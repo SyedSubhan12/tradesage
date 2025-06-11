@@ -14,7 +14,7 @@ __pycache__
 desktop.ini
 
 # Virtual environments
-auth_service/.venv
+auth_service/.venv/
 venv/
 env/
 ENV/
