@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Auth & OAuth Test Page</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 0; background-color: #f0f2f5; color: #333; display: flex; flex-direction: column; min-height: 100vh; }
+        header { background-color: #007bff; color: white; padding: 15px 30px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        header h1 { margin: 0; font-size: 1.8em; }
+        .main-container { display: flex; flex: 1; padding: 20px; gap: 20px; }
+        nav { background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); width: 250px; height: fit-content; }
+        nav h3 { margin-top: 0; color: #007bff; border-bottom: 2px solid #007bff; padding-bottom: 10px; }
+        nav ul { list-style-type: none; padding: 0; margin: 0; }
+        nav ul li a { text-decoration: none; color: #333; display: block; padding: 10px 15px; border-radius: 4px; transition: background-color 0.3s, color 0.3s; }
+        nav ul li a:hover, nav ul li a.active { background-color: #007bff; color: white; }
+        .content { flex: 1; display: flex; flex-direction: column; gap: 20px; }
+        .container { background-color: #fff; padding: 25px; border-radius: 8px; box-shadow: 0 0 15px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        h2 { color: #0056b3; border-bottom: 2px solid #0056b3; padding-bottom: 10px; margin-top: 0; font-size: 1.5em; }
+        label { display: block; margin-top: 15px; font-weight: 600; color: #555; }
+        input[type="text"], input[type="password"], input[type="email"], input[type="url"], textarea, select {
+            width: calc(100% - 24px); padding: 12px; margin-top: 8px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; transition: border-color 0.3s;
+        }
+        input[type="text"]:focus, input[type="password"]:focus, input[type="email"]:focus, input[type="url"]:focus, textarea:focus, select:focus { border-color: #007bff; outline: none; }
+        button { background-color: #28a745; color: white; padding: 12px 18px; border: none; border-radius: 4px; cursor: pointer; margin-top: 15px; font-size: 1em; transition: background-color 0.3s; }
+        button:hover { background-color: #218838; }
+        .delete-button { background-color: #dc3545; }
+        .delete-button:hover { background-color: #c82333; }
+        #responseArea, #tokenStoreArea { margin-top: 20px; padding: 15px; border-radius: 4px; background-color: #e9ecef; border: 1px solid #ced4da; white-space: pre-wrap; word-wrap: break-word; max-height: 400px; overflow-y: auto; font-family: 'Courier New', Courier, monospace; }
+        .flex-row { display: flex; gap: 10px; align-items: flex-end; }
+        .flex-row > div { flex: 1; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Tradesage API Test Interface</h1>
+    </header>
+
+    <div class="main-container">
+        <nav>
+            <h3>Navigation</h3>
+            <ul>
+                <li><a href="#configSection" class="nav-link">Configuration</a></li>
+                <li><a href="#oauthClientSection" class="nav-link">OAuth Client Management</a></li>
+                <li><a href="#authCodeSection" class="nav-link">OAuth Auth Code Flow (PKCE)</a></li>
+                <li><a href="#refreshTokenSection" class="nav-link">OAuth Refresh Token Flow</a></li>
+                <li><a href="#clientCredsSection" class="nav-link">OAuth Client Credentials Flow</a></li>
+                <li><a href="#userAuthSection" class="nav-link">User Authentication</a></li>
+                <li><a href="#passwordMgmtSection" class="nav-link">Password Management</a></li>
+            </ul>
+        </nav>
+
+        <div class="content">
+            <div id="configSection" class="container">
+                <h2>Configuration</h2>
+                <label for="apiBaseUrl">API Base URL:</label>
+                <input type="text" id="apiBaseUrl" value="http://localhost:8000">
+                <label for="oauthAdminUsername">OAuth Admin Username (for client mgmt):</label>
+                <input type="text" id="oauthAdminUsername" value="admin@example.com">
+                <label for="oauthAdminPassword">OAuth Admin Password:</label>
+                <input type="password" id="oauthAdminPassword">
+                <button onclick="storeAdminCredentials()">Store Admin Credentials</button>
+            </div>
+
+            <div id="tokenStoreAreaContainer" class="container">
+                 <h2>Stored Tokens & Data</h2>
+                 <pre id="tokenStoreArea">No tokens stored yet.</pre>
+            </div>
+
+            <!-- OAuth Client Management -->
+            <div id="oauthClientSection" class="container hidden">
+                <h2>OAuth Client Management (Admin)</h2>
+                <div class="flex-row">
+                    <div>
+                        <label for="clientRedirectUris">Redirect URIs (comma-separated):</label>
+                        <input type="text" id="clientRedirectUris" value="http://localhost:8000/test_auth_oauth.html,http://127.0.0.1:5500/test_auth_oauth.html">
+                    </div>
+                    <div>
+                        <label for="clientGrantTypes">Grant Types (comma-separated):</label>
+                        <input type="text" id="clientGrantTypes" value="authorization_code,refresh_token,client_credentials">
+                    </div>
+                </div>
+                <div class="flex-row">
+                    <div>
+                        <label for="clientScopes">Scopes (comma-separated):</label>
+                        <input type="text" id="clientScopes" value="openid,profile,email">
+                    </div>
+                    <div>
+                        <label for="isConfidential">Is Confidential Client?</label>
+                        <select id="isConfidential">
+                            <option value="true" selected>Yes</option>
+                            <option value="false">No</option>
+                        </select>
+                    </div>
+                </div>
+                <button onclick="createOAuthClient()">Create Client</button>
+                <hr>
+                <button onclick="listOAuthClients()">List Clients</button>
+                <hr>
+                <label for="manageClientId">Client ID (for Get/Update/Delete):</label>
+                <input type="text" id="manageClientId">
+                <button onclick="getOAuthClient()">Get Client</button>
+                <button onclick="updateOAuthClient()">Update Client (uses above fields)</button>
+                <button class="delete-button" onclick="deleteOAuthClient()">Delete Client</button>
+            </div>
+
+            <!-- Authorization Code Flow (PKCE) -->
+            <div id="authCodeSection" class="container hidden">
+                <h2>OAuth Authorization Code Flow (PKCE)</h2>
+                <label for="authClientId">Client ID:</label>
+                <input type="text" id="authClientId">
+                <label for="authRedirectUri">Redirect URI:</label>
+                <input type="text" id="authRedirectUri" value="http://localhost:8000/test_auth_oauth.html">
+                <label for="authScope">Scope:</label>
+                <input type="text" id="authScope" value="openid profile email">
+                <button onclick="startAuthCodeFlow()">1. Start Authorization</button>
+                <p>After redirection, the page will attempt to parse the code. Then click step 2.</p>
+                <label for="authCode">Authorization Code (auto-filled):</label>
+                <input type="text" id="authCode" readonly>
+                <button onclick="exchangeCodeForToken()">2. Exchange Code for Token</button>
+            </div>
+
+            <!-- Refresh Token Flow -->
+            <div id="refreshTokenSection" class="container hidden">
+                <h2>OAuth Refresh Token Flow</h2>
+                <label for="refreshClientId">Client ID:</label>
+                <input type="text" id="refreshClientId">
+                <label for="refreshClientSecret">Client Secret (if confidential):</label>
+                <input type="password" id="refreshClientSecret">
+                <label for="oauthRefreshToken">Refresh Token:</label>
+                <input type="text" id="oauthRefreshToken">
+                <button onclick="refreshOAuthToken()">Refresh OAuth Token</button>
+            </div>
+
+            <!-- Client Credentials Flow -->
+            <div id="clientCredsSection" class="container hidden">
+                <h2>OAuth Client Credentials Flow</h2>
+                <label for="clientCredsClientId">Client ID:</label>
+                <input type="text" id="clientCredsClientId">
+                <label for="clientCredsClientSecret">Client Secret:</label>
+                <input type="password" id="clientCredsClientSecret">
+                <button onclick="getClientCredentialsToken()">Get Client Credentials Token</button>
+            </div>
+
+            <!-- User Authentication -->
+            <div id="userAuthSection" class="container hidden">
+                <h2>User Authentication</h2>
+                <label for="userEmail">User Email:</label>
+                <input type="email" id="userEmail">
+                <label for="userPassword">User Password:</label>
+                <input type="password" id="userPassword">
+                <button onclick="loginUser()">Login</button>
+                <hr>
+                <label for="sessionRefreshToken">Session Refresh Token:</label>
+                <input type="text" id="sessionRefreshToken">
+                <button onclick="refreshSessionToken()">Refresh Session Token</button>
+                <hr>
+                <button onclick="logoutUser()">Logout</button>
+            </div>
+
+            <!-- Password Management -->
+            <div id="passwordMgmtSection" class="container hidden">
+                <h2>Password Management</h2>
+                <label for="changePassOld">Current Password (for Change Password):</label>
+                <input type="password" id="changePassOld">
+                <label for="changePassNew">New Password (for Change Password):</label>
+                <input type="password" id="changePassNew">
+                <button onclick="changePassword()">Change Password</button>
+                <hr>
+                <label for="resetPassEmail">Email for Password Reset Request:</label>
+                <input type="email" id="resetPassEmail">
+                <button onclick="requestPasswordReset()">Request Password Reset</button>
+                <hr>
+                <label for="resetToken">Password Reset Token (from email):</label>
+                <input type="text" id="resetToken">
+                <label for="newPasswordConfirm">New Password (for Reset Confirm):</label>
+                <input type="password" id="newPasswordConfirm">
+                <button onclick="confirmPasswordReset()">Confirm Password Reset</button>
+            </div>
+
+            <div class="container">
+                <h2>API Response</h2>
+                <pre id="responseArea">Responses will appear here.</pre>
+            </div>
+        </div>
+    </div>
+
+    <script src="test_auth_oauth.js"></script>
+</body>
+</html>

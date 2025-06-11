@@ -1,0 +1,78 @@
+name: Python CI/CD
+
+on:
+  # Triggers the workflow on push or pull request events but only for the "main" branch
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  auth-service:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./auth_service
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install uv
+        run: pip install uv
+      - name: Install dependencies
+        run: uv sync --locked
+<<<<<<< HEAD
+      - name: Install pytest
+        run: pip install pytest
+=======
+>>>>>>> 75fe56dd2f59c76b8206e0d8063918217aa17af5
+      - name: Run tests
+        run: pytest
+
+  tenant-service:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./tenant-service
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install uv
+        run: pip install uv
+      - name: Install dependencies
+        run: uv sync --locked
+<<<<<<< HEAD
+      - name: Install pytest
+        run: pip install pytest
+=======
+>>>>>>> 75fe56dd2f59c76b8206e0d8063918217aa17af5
+      - name: Run tests
+        run: pytest
+
+  user-service:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./user-service
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install uv
+        run: pip install uv
+      - name: Install dependencies
+        run: uv sync --locked
+<<<<<<< HEAD
+      - name: Install pytest
+        run: pip install pytest
+=======
+>>>>>>> 75fe56dd2f59c76b8206e0d8063918217aa17af5
+      - name: Run tests
+        run: pytest
