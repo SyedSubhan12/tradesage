@@ -1,0 +1,110 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 222 47% 11%;
+    --foreground: 210 40% 98%;
+
+    --card: 222 47% 11%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 222 47% 11%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 156 100% 50%;
+    --primary-foreground: 222 47% 11%;
+
+    --secondary: 217 32% 17%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 217 32% 17%;
+    --muted-foreground: 215 20% 65%;
+
+    --accent: 192 100% 50%;
+    --accent-foreground: 210 40% 98%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 217 32% 17%;
+    --input: 217 32% 17%;
+    --ring: 156 100% 50%;
+
+    --radius: 0.5rem;
+
+    --sidebar-background: 222 47% 11%;
+    --sidebar-foreground: 210 40% 98%;
+    --sidebar-primary: 156 100% 50%;
+    --sidebar-primary-foreground: 222 47% 11%;
+    --sidebar-accent: 192 100% 50%; 
+    --sidebar-accent-foreground: 210 40% 98%;
+    --sidebar-border: 217 32% 17%;
+    --sidebar-ring: 156 100% 50%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    @apply scroll-smooth;
+    scroll-behavior: smooth;
+    scroll-padding-top: 80px; /* Add padding for fixed navbar */
+  }
+
+  body {
+    @apply bg-space-blue text-arctic antialiased;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-display font-bold;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    @apply w-2;
+  }
+  
+  ::-webkit-scrollbar-track {
+    @apply bg-graphite/50 rounded-full;
+  }
+  
+  ::-webkit-scrollbar-thumb {
+    @apply bg-neon-green/50 rounded-full hover:bg-neon-green/70 transition-colors duration-300;
+  }
+}
+
+@layer components {
+  .neon-gradient {
+    @apply bg-gradient-to-r from-neon-green to-electric-cyan bg-clip-text text-transparent;
+  }
+
+  .card-gradient {
+    @apply bg-gradient-to-br from-graphite to-space-blue;
+  }
+
+  .btn-gradient {
+    @apply bg-gradient-to-r from-neon-green to-electric-cyan hover:from-neon-green/90 hover:to-electric-cyan/90 transition-all duration-300;
+  }
+
+  .glass-panel {
+    @apply bg-space-blue/80 backdrop-blur-md border border-white/10;
+  }
+  
+  .performance-positive {
+    @apply text-neon-green;
+  }
+  
+  .performance-negative {
+    @apply text-danger;
+  }
+
+  /* Smooth section transitions */
+  section {
+    @apply transition-all duration-500;
+  }
+}

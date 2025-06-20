@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TradeSage Auth Service Tester</title>
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+    <header>
+        <h1>TradeSage Auth Service API Tester</h1>
+        <p>A comprehensive testing interface for the Authentication Service</p>
+    </header>
+
+    <main>
+        <section class="card" id="health-section">
+            <h2>Health Check</h2>
+            <button id="healthCheckButton">Test Health Check</button>
+            <div class="response-container">
+                <h3>Response:</h3>
+                <pre id="healthStatus">No response yet</pre>
+            </div>
+        </section>
+
+        <section class="card" id="register-section">
+            <h2>Register User</h2>
+            <div class="form-group">
+                <label for="registerUsername">Username:</label>
+                <input type="text" id="registerUsername" placeholder="Username" required />
+            </div>
+            <div class="form-group">
+                <label for="registerEmail">Email:</label>
+                <input type="email" id="registerEmail" placeholder="Email" required />
+            </div>
+            <div class="form-group">
+                <label for="registerPassword">Password:</label>
+                <input type="password" id="registerPassword" placeholder="Password" required />
+            </div>
+            <div class="form-group">
+                <label for="registerFirstName">First Name:</label>
+                <input type="text" id="registerFirstName" placeholder="First Name" />
+            </div>
+            <div class="form-group">
+                <label for="registerLastName">Last Name:</label>
+                <input type="text" id="registerLastName" placeholder="Last Name" />
+            </div>
+            <div class="form-group">
+                <label for="registerRole">Role:</label>
+                <select id="registerRole" required>
+                    <option value="trader">Trader</option>
+                    <option value="admin">Admin</option>
+                    <option value="viewer">Viewer</option>
+                    <option value="api_user">API User</option>
+                </select>
+            </div>
+            <button id="registerButton">Register</button>
+            <div class="response-container">
+                <h3>Response:</h3>
+                <pre id="registerStatus">No response yet</pre>
+            </div>
+        </section>
+
+        <section class="card" id="login-section">
+            <h2>Login User</h2>
+            <div class="form-group">
+                <label for="loginUsername">Email:</label>
+                <input type="email" id="loginEmail" placeholder="Email" required />
+            </div>
+            <div class="form-group">
+                <label for="loginPassword">Password:</label>
+                <input type="password" id="loginPassword" placeholder="Password" required />
+            </div>
+        
+            <button id="loginButton">Login</button>
+            <div class="response-container">
+                <h3>Response:</h3>
+                <pre id="loginStatus">No response yet</pre>
+            </div>
+        </section>
+
+        <section class="card" id="token-section">
+            <h2>Token Management</h2>
+            <div class="token-display">
+                <h3>Current Token:</h3>
+                <div class="token-container">
+                    <pre id="currentToken">No token</pre>
+                </div>
+            </div>
+            <div class="button-group">
+                <button id="verifyTokenButton">Verify Token</button>
+                <button id="refreshTokenButton">Refresh Token</button>
+                <button id="logoutButton">Logout</button>
+            </div>
+            <div class="response-container">
+                <h3>Response:</h3>
+                <pre id="tokenStatus">No response yet</pre>
+            </div>
+        </section>
+
+        <section class="card" id="user-section">
+            <h2>User Management</h2>
+            <button id="getCurrentUserButton">Get Current User</button>
+            <div class="response-container">
+                <h3>Response:</h3>
+                <pre id="userStatus">No response yet</pre>
+            </div>
+        </section>
+
+        <section class="card" id="password-section">
+            <h2>Password Management</h2>
+            <div class="tab-container">
+                <div class="tab-buttons">
+                    <button class="tab-button active" data-tab="change">Change Password</button>
+                    <button class="tab-button" data-tab="reset">Reset Password</button>
+                </div>
+                <div class="tab-content active" id="change-tab">
+                    <div class="form-group">
+                        <label for="changeOldPassword">Current Password:</label>
+                        <input type="password" id="changeOldPassword" placeholder="Current Password" required />
+                    </div>
+                    <div class="form-group">
+                        <label for="changeNewPassword">New Password:</label>
+                        <input type="password" id="changeNewPassword" placeholder="New Password" required />
+                    </div>
+                    <button id="changePasswordButton">Change Password</button>
+                </div>
+                <div class="tab-content" id="reset-tab">
+                    <div class="form-group">
+                        <label for="resetEmail">Email:</label>
+                        <input type="email" id="resetEmail" placeholder="Email" required />
+                    </div>
+                    <button id="requestResetButton">Request Reset</button>
+                    <hr>
+                    <div class="form-group">
+                        <label for="confirmResetToken">Reset Token:</label>
+                        <input type="text" id="confirmResetToken" placeholder="Reset Token" required />
+                    </div>
+                    <div class="form-group">
+                        <label for="confirmResetNewPassword">New Password:</label>
+                        <input type="password" id="confirmResetNewPassword" placeholder="New Password" required />
+                    </div>
+                    <button id="confirmResetButton">Confirm Reset</button>
+                </div>
+            </div>
+            <div class="response-container">
+                <h3>Response:</h3>
+                <pre id="passwordStatus">No response yet</pre>
+            </div>
+        </section>
+
+        <section class="card" id="tenant-section">
+            <h2>Tenant Management</h2>
+            <div class="form-group">
+                <label for="tenantId">Tenant ID:</label>
+                <input type="text" id="tenantId" placeholder="Tenant ID" required />
+            </div>
+            <button id="getTenantStatusButton">Get Tenant Status</button>
+            <div class="response-container">
+                <h3>Response:</h3>
+                <pre id="tenantStatus">No response yet</pre>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>TradeSage Authentication Service - API Testing Interface</p>
+    </footer>
+
+    <script src="script.js"></script>
+</body>
+</html>
