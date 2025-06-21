@@ -3,6 +3,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from common.rate_limiter import rate_limiter, get_rate_limit
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from datetime import timedelta, datetime, timezone
 from uuid import UUID as UUIDType, uuid4
 import logging
@@ -10,7 +11,7 @@ import secrets
 import hashlib
 
 from common.database import db_manager
-from common.auth import auth_manager
+from common.auth import auth_manager, TokenExpiredError
 from common.models import BaseUser, Tenant, TenantStatus, User
 from common.utils import get_user_by_username_or_email
 from common.audit_logger import log_audit_event
@@ -339,6 +340,9 @@ async def logout(
                 payload = auth_manager.decode_token(token, is_refresh=False)
                 if payload:
                     session_id_to_revoke = payload.session_id
+            except TokenExpiredError:
+                # If the token is expired, we might not get a session_id, but logout should proceed.
+                logger.warning(f"Access token expired during logout for user {current_user.email}, proceeding with logout.")
             except Exception as e:
                 logger.warning(f"Error decoding token during logout for user {current_user.email}: {e}")
 
@@ -418,7 +422,15 @@ async def refresh_access_token(
             )
 
         try:
-            token_payload = auth_manager.decode_token(refresh_token_raw, is_refresh=True)
+            try:
+                token_payload = auth_manager.decode_token(refresh_token_raw, is_refresh=True)
+                if not token_payload or not token_payload.user_id or not token_payload.session_id:
+                    logger.warning("Invalid refresh token payload")
+                    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
+            except TokenExpiredError:
+                logger.warning("Refresh token has expired.")
+                await db.rollback()  # Rollback the transaction to prevent a dirty session
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token has expired")
         except Exception as e: # Catch specific JoseErrors if possible
             await log_audit_event(
                 event_type="token_refresh_failed",
@@ -574,12 +586,26 @@ async def refresh_access_token(
 
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Error refreshing token: {e}", exc_info=True)
+    except IntegrityError as e:
+        logger.error(f"Database integrity error refreshing token: {e}", exc_info=True)
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A database conflict occurred. Please try again."
+        )
+    except SQLAlchemyError as e:
+        logger.error(f"Database error refreshing token: {e}", exc_info=True)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Could not refresh token"
+            detail="A database error occurred while refreshing the token."
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error refreshing token: {e}", exc_info=True)
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred."
         )
 
 @router.post("/password/change")

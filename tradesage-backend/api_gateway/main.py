@@ -1,6 +1,6 @@
 import httpx
 import logging
-from fastapi import FastAPI, Request, HTTPException, status, APIRouter
+from fastapi import FastAPI, Request, HTTPException, status, APIRouter, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import Response
@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from starlette_prometheus import metrics, PrometheusMiddleware
 
 from common.config import settings
-from common.auth import auth_manager
+from common.auth import auth_manager, TokenExpiredError
 from common.logging_config import setup_logging
 
 # Configure structured logging
@@ -89,12 +89,15 @@ async def auth_middleware(request: Request, call_next):
     try:
         payload = auth_manager.decode_token(token, is_refresh=False)
         if not payload:
-            logger.warning("Forbidden: Invalid token payload for API path {request.url.path}")
-            raise HTTPException(status_code=403, detail="Could not validate credentials")
+            logger.warning(f"Forbidden: Invalid token payload for API path {request.url.path}")
+            return Response(status_code=403, content="Could not validate credentials", headers={"WWW-Authenticate": "Bearer"})
         
         request.state.user = payload
         logger.info(f"Authenticated user {payload.user_id} for API path {request.url.path}")
 
+    except TokenExpiredError:
+        logger.warning(f"Unauthorized: Expired token for API path {request.url.path}")
+        return Response(status_code=401, content="Token has expired", headers={"WWW-Authenticate": "Bearer"})
     except Exception as e:
         logger.error(f"An unexpected error occurred during token validation for API path {request.url.path}: {e}", exc_info=True)
         return Response(status_code=403, content="Could not validate credentials", headers={"WWW-Authenticate": "Bearer"})

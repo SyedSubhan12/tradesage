@@ -9,7 +9,7 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from common.database import db_manager
-from common.auth import auth_manager
+from common.auth import auth_manager, TokenExpiredError, TokenExpiredError
 from common.models import BaseUser
 from common.utils import get_user_by_id
 
@@ -39,7 +39,7 @@ async def get_current_user_from_access_token(
 
         return user
 
-    except JWTError:
+    except (JWTError, TokenExpiredError):
         raise credentials_exception
     except Exception:
         raise credentials_exception
@@ -67,7 +67,7 @@ async def get_current_user_from_refresh_token(
 
         return user
 
-    except JWTError:
+    except (JWTError, TokenExpiredError):
         raise credentials_exception
     except Exception:
         raise credentials_exception

@@ -2,6 +2,39 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from jose import JWTError, jwt
+
+class TokenExpiredError(Exception):
+    """"
+    Custom exception for expired tokens.
+
+    This exception is raised when a JWT token has passed its expiration time.
+    It can optionally carry details about the token for logging and error handling.
+
+    Attributes:
+        message (str): A human-readable error message.
+        token_type (Optional[str]): The type of token that expired (e.g., 'access', 'refresh').
+        expired_at (Optional[datetime]): The timestamp when the token expired.
+    """
+
+    def __init__(
+        self,
+        message: str = "Token has expired",
+        token_type: Optional[str] = None,
+        expired_at: Optional[datetime] = None,
+    ):
+        self.message = message
+        self.token_type = token_type
+        self.expired_at = expired_at
+        super().__init__(self.message)
+
+    def __str__(self) -> str:
+        """Provide a detailed string representation."""
+        details = [f"message='{self.message}'"]
+        if self.token_type:
+            details.append(f"token_type='{self.token_type}'")
+        if self.expired_at:
+            details.append(f"expired_at='{self.expired_at.isoformat()}'")
+        return f"TokenExpiredError({', '.join(details)})"
 from fastapi.security import OAuth2PasswordBearer
 from passlib.context import CryptContext
 from pydantic import BaseModel, ConfigDict
@@ -450,8 +483,41 @@ class AuthManager:
             return TokenData(**payload)
 
         except jwt.ExpiredSignatureError:
-            logger.warning("Token has expired")
-            return None
+            # Token has expired, try to decode without verification to get claims for better error logging
+            try:
+                unverified_payload = jwt.decode(
+                    token,
+                    self.public_key,
+                    algorithms=[self.algorithm],
+                    audience=expected_audience,
+                    options={
+                        "verify_signature": False,
+                        "verify_aud": False,
+                        "verify_exp": False,
+                        "verify_nbf": False,
+                        "verify_iat": False,
+                        "verify_iss": False,
+                    },
+                )
+                token_type = unverified_payload.get("token_type")
+                expired_at = (
+                    datetime.fromtimestamp(unverified_payload.get("exp"), tz=timezone.utc)
+                    if unverified_payload.get("exp")
+                    else None
+                )
+                logger.warning(
+                    f"Token has expired. Type: {token_type}, Expired at: {expired_at}",
+                    extra={"token_type": token_type, "expired_at": expired_at},
+                )
+                raise TokenExpiredError(
+                    message="Token has expired",
+                    token_type=token_type,
+                    expired_at=expired_at,
+                )
+            except JWTError:
+                # If we can't even decode it, raise the basic error
+                logger.warning("Token has expired, but claims could not be decoded.")
+                raise TokenExpiredError("Token has expired")
         except jwt.JWTClaimsError as e:
             logger.error(f"JWT claims validation error: {e}")
             return None
@@ -519,11 +585,15 @@ class AuthManager:
                 logger.error("Token failed pre-validation check")
                 return None
 
-            token_data = self.decode_token(token, is_refresh=is_refresh)
-            if not token_data or not token_data.user_id:
-                logger.error(
-                    f"Invalid token data: user_id={token_data.user_id if token_data else 'None'}"
-                )
+            try:
+                token_data = self.decode_token(token, is_refresh=is_refresh)
+                if not token_data or not token_data.user_id:
+                    logger.error(
+                        f"Invalid token data: user_id={token_data.user_id if token_data else 'None'}"
+                    )
+                    return None
+            except TokenExpiredError:
+                logger.warning("Token verification failed: token has expired")
                 return None
 
             logger.debug(f"Token verification successful for user_id: {token_data.user_id}")

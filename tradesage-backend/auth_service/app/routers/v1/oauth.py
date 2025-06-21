@@ -295,6 +295,7 @@ async def login_google():
 
 @router.get("/google/callback")
 async def google_callback(
+    request: Request,
     code: str,
     state: Optional[str] = None,
     error: Optional[str] = None,
@@ -380,21 +381,27 @@ async def google_callback(
                     details={"provider": "google"}
                 )
             
-            # Generate JWT tokens
+            # Create a user session first to get a session_id
+            session_id = str(uuid4())
+
+            # Generate JWT tokens, ensuring session_id is included
             access_token = auth_manager.create_access_token(
                 data={
                     "email": user.email,
                     "is_active": user.is_active,
                     "is_verified": user.is_verified,
                     "tenant_id": str(user.tenant_id) if user.tenant_id else None,
+                    "session_id": session_id,  # Explicitly include session_id in payload
                 },
                 user_id=str(user.id),
+                session_id=session_id, # Pass as argument as well for clarity
                 expires_in=timedelta(minutes=settings.access_token_expire_minutes)
             )
             
             refresh_token = auth_manager.create_refresh_token(
-                data={"sub": str(user.id)},
+                data={"sub": str(user.id), "session_id": session_id},
                 user_id=str(user.id),
+                session_id=session_id, # Pass as argument
                 expires_in=timedelta(days=settings.refresh_token_expire_days)
             )
             
@@ -433,17 +440,15 @@ async def google_callback(
                 expires_at=datetime.now(timezone.utc) + timedelta(days=settings.refresh_token_expire_days)
             )
             db.add(new_refresh_token)
-            await db.commit()
 
             # Create user session entry
-            session_id = str(uuid4())
             new_session = UserSession(
                 user_id=user.id,
                 session_id=session_id,
                 refresh_token_hash=refresh_token_hash,
                 expires_at=datetime.now(timezone.utc) + timedelta(minutes=settings.access_token_expire_minutes),
-                client_ip=None,
-                user_agent=None,
+                client_ip=request.client.host if request else None,
+                user_agent=request.headers.get("user-agent") if request else None,
             )
             db.add(new_session)
             await db.commit()

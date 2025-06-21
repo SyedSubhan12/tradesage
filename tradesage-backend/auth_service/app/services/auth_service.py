@@ -73,32 +73,44 @@ async def is_token_blacklisted(db: AsyncSession, token: str) -> bool:
         return False
 
 async def cleanup_expired_tokens(db: AsyncSession):
-    """Clean up expired password reset tokens, sessions, and blacklisted tokens"""
+    """
+    Clean up expired password reset tokens, sessions, and blacklisted tokens.
+
+    This is an async generator that yields the number of deleted items for each category.
+    """
     from auth_service.app.models.password_reset_token_models import PasswordResetToken
-    
+
     try:
         current_time = datetime.now(timezone.utc)
-        
+
         # Clean expired password reset tokens
-        await db.execute(
-            delete(PasswordResetToken).where(
-                PasswordResetToken.expires_at < current_time
-            )
+        result = await db.execute(
+            delete(PasswordResetToken).where(PasswordResetToken.expires_at < current_time)
         )
-        
+        deleted_count = result.rowcount
+        logger.info(f"Deleted {deleted_count} expired password reset tokens.")
+        yield deleted_count
+
         # Clean expired user sessions
-        await db.execute(
-            delete(UserSession).where(
-                UserSession.expires_at < current_time
-            )
+        result = await db.execute(
+            delete(UserSession).where(UserSession.expires_at < current_time)
         )
-        
+        deleted_count = result.rowcount
+        logger.info(f"Deleted {deleted_count} expired user sessions.")
+        yield deleted_count
+
         # Clean expired blacklisted tokens
-        await db.execute(
-            delete(TokenBlacklist).where(
-                TokenBlacklist.expires_at < current_time
-            )
+        result = await db.execute(
+            delete(TokenBlacklist).where(TokenBlacklist.expires_at < current_time)
         )
+        deleted_count = result.rowcount
+        logger.info(f"Deleted {deleted_count} expired blacklisted tokens.")
+        yield deleted_count
+
+    except Exception as e:
+        logger.error(f"Error during token cleanup: {e}")
+        # The session rollback will be handled by the context manager in main.py
+        raise
         
         await db.commit()
         logger.info("Cleaned up expired tokens, sessions, and blacklisted tokens")

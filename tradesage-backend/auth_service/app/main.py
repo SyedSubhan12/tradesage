@@ -70,13 +70,17 @@ async def lifespan(app: FastAPI):
         # Schedule cleanup task
         async def periodic_cleanup():
             while True:
+                await asyncio.sleep(3600)  # Run every hour
                 try:
-                    await asyncio.sleep(3600)  # Run every hour
-                    db = await db_manager.get_session()
-                    await cleanup_expired_tokens(db)
-                    await db.close()
+                    logger.info("Starting periodic cleanup...")
+                    async with db_manager.get_session() as db:
+                        # Use async for to correctly iterate over the async generator
+                        async for deleted_count in cleanup_expired_tokens(db):
+                            logger.info(f"Cleanup processed {deleted_count} items.")
+                        await db.commit()
+                    logger.info("Periodic cleanup finished successfully.")
                 except Exception as e:
-                    logger.error("Periodic cleanup error", error=e)
+                    logger.error("Periodic cleanup error", error=e, exc_info=True)
         
         cleanup_task = asyncio.create_task(periodic_cleanup())
         logger.info("Auth Service Started")
