@@ -2,6 +2,8 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from sqlalchemy.orm import declarative_base
 from sqlalchemy import text
 import logging
+import sqlalchemy.exc
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from common.config import settings
 from typing import AsyncGenerator
 
@@ -22,11 +24,12 @@ class DatabaseManager:
             db_url = str(self.database_url)
             self._engine = create_async_engine(
                 db_url,
-                echo=True,
+                echo=False,  # Disable in production
                 pool_pre_ping=True,
-                pool_recycle=300,
+                pool_recycle=3600,
                 pool_size=20,
-                max_overflow=30
+                max_overflow=30,
+                pool_timeout=30
             )
             self.session_factory = async_sessionmaker(
                 bind=self._engine, expire_on_commit=False, class_=AsyncSession
@@ -47,7 +50,18 @@ class DatabaseManager:
         async with self.async_session() as session:
             try:
                 yield session
-                await session.commit()
+
+                @retry(
+                    stop=stop_after_attempt(3),
+                    wait=wait_exponential(multiplier=1, min=4, max=10),
+                    retry=retry_if_exception_type((sqlalchemy.exc.OperationalError,)),
+                    reraise=True
+                )
+                async def do_commit():
+                    await session.commit()
+
+                await do_commit()
+
             except Exception as e:
                 logger.error(f"Failed to commit transaction: {e}")
                 await session.rollback()

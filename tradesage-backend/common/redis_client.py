@@ -1,7 +1,8 @@
 import redis.asyncio as redis
 import json
 import logging
-from typing import Any, Optional
+import uuid
+from typing import Any, Optional, Dict
 from common.config import settings
 
 logger = logging.getLogger(__name__)
@@ -11,16 +12,19 @@ class RedisManager:
         self.redis_url = str(redis_url) if redis_url else str(settings.redis_url)
         self.redis_client = None
     async def connect(self):
-        """Connect to Redis"""
+        """Connect to Redis using production-ready settings."""
         try:
             logger.debug(f"Attempting Redis connection with URL: {self.redis_url}")
+            # Production-ready Redis configuration
             self.redis_client = redis.from_url(
-                settings.redis_url,
+                self.redis_url,
                 encoding='utf-8',
-                decode_responses=True
+                decode_responses=True,
+                socket_timeout=5,
+                socket_connect_timeout=5,
+                retry_on_timeout=True,
+                health_check_interval=30
             )
-
-            #Test Connection
             await self.redis_client.ping()
             logger.info("Redis connection established")
         except Exception as e:
@@ -75,6 +79,31 @@ class RedisManager:
         if not self.redis_client:
             await self.connect()
         return self.redis_client
+
+    async def create_user_session(self, user_id: str, extra_data: Optional[Dict[str, Any]] = None, expire: int = 3600) -> str:
+        """
+        Creates a user session in Redis.
+        Returns the session ID.
+        """
+        session_id = str(uuid.uuid4())
+        session_key = f"session:{session_id}"
+        session_data = {"user_id": user_id}
+        if extra_data:
+            session_data.update(extra_data)
+        
+        await self.set(session_key, session_data, expire=expire)
+        logger.info(f"Created session {session_id} for user {user_id}")
+        return session_id
+
+    async def get_session_data(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Gets session data from Redis."""
+        session_key = f"session:{session_id}"
+        return await self.get(session_key)
+
+    async def delete_session(self, session_id: str):
+        """Deletes a session from Redis."""
+        session_key = f"session:{session_id}"
+        await self.delete(session_key)
 
 # Global Redis Manager
 redis_manager = RedisManager()

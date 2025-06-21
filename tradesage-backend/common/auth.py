@@ -19,8 +19,7 @@ from .logger import logger
 # ────────────────────────────────────────────────────────────────────────────────
 # Audience constants to avoid typos
 # ────────────────────────────────────────────────────────────────────────────────
-ACCESS_TOKEN_AUDIENCE = "tradesage-api-gateway"
-REFRESH_TOKEN_AUDIENCE = "tradesage-auth-service"
+
 
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -36,6 +35,8 @@ class TokenData(BaseModel):
     session_id: Optional[str] = None
     expires_in: Optional[datetime] = None
     jti: Optional[str] = None
+    token_type: Optional[str] = None
+    ver: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -202,7 +203,7 @@ class AuthManager:
             return None
 
     # ────────────────────────────────────────────────────────────────────────────
-    # Create Access Token (aud = ACCESS_TOKEN_AUDIENCE)
+    # Create Access Token (aud = settings.API_GATEWAY_AUDIENCE)
     # ────────────────────────────────────────────────────────────────────────────
     def create_access_token(
         self,
@@ -242,7 +243,9 @@ class AuthManager:
                 "iat": int(now.timestamp()),     # Convert to int timestamp  
                 "nbf": int(now.timestamp()),     # Convert to int timestamp
                 "iss": "tradesage-auth-service",
-                "aud": ACCESS_TOKEN_AUDIENCE,
+                "aud": settings.API_GATEWAY_AUDIENCE,  # Use API_GATEWAY_AUDIENCE for consistency
+                "token_type": "access",
+                "ver": "1.0",
                 "jti": str(uuid4()),
             }
         )
@@ -258,7 +261,7 @@ class AuthManager:
 
         try:
             logger.debug(f"Creating access token for user_id: {to_encode.get('user_id')}")
-            logger.debug(f"Token audience: {ACCESS_TOKEN_AUDIENCE}")
+            logger.debug(f"Token audience: {settings.API_GATEWAY_AUDIENCE}")
             logger.debug(f"Token expires at: {expire}")
             logger.debug(f"Access token payload for debugging: {to_encode}")
 
@@ -338,7 +341,9 @@ class AuthManager:
                 "iat": int(now.timestamp()),     # Convert to int timestamp
                 "nbf": int(now.timestamp()),     # Convert to int timestamp
                 "iss": "tradesage-auth-service",
-                "aud": REFRESH_TOKEN_AUDIENCE,
+                "aud": settings.API_GATEWAY_AUDIENCE,  # Use API_GATEWAY_AUDIENCE for consistency
+                "token_type": "refresh",
+                "ver": "1.0",
                 "jti": str(uuid4()),
             }
         )
@@ -405,91 +410,54 @@ class AuthManager:
             return None
 
         # Clean the token – remove Bearer prefix if present
-        original_token = token
         token = token.replace("Bearer ", "").strip()
 
-        # Early validation to catch corruption
         if not self._validate_token_format(token):
             logger.error("Token failed format validation")
             return None
 
-        audience = REFRESH_TOKEN_AUDIENCE if is_refresh else ACCESS_TOKEN_AUDIENCE
-        logger.info(f"--- P2 DEBUG: Decoding token. is_refresh={is_refresh}, expected_audience='{audience}'")
+        expected_audience = settings.API_GATEWAY_AUDIENCE  # Use API_GATEWAY_AUDIENCE for consistency
+        expected_token_type = "refresh" if is_refresh else "access"
 
         try:
-            # Enhanced debugging
-            logger.debug(f"Original token length: {len(original_token)}")
-            logger.debug(f"Cleaned token length: {len(token)}")
-            logger.debug(f"Token starts with: {token[:30]}...")
-            logger.debug(f"Expected audience: {audience}")
-            logger.debug(f"Algorithm: {self.algorithm}")
-
-            # Decode and validate header
-            header = self._decode_token_header(token)
-            if header:
-                logger.debug(f"Token header: {header}")
-                token_alg = header.get("alg", "unknown")
-                if token_alg != self.algorithm:
-                    logger.error(f"Algorithm mismatch: token uses {token_alg}, server expects {self.algorithm}")
-                    return None
-
-            # Decode the token with strict validation
             payload = jwt.decode(
                 token,
                 self.public_key,
                 algorithms=[self.algorithm],
-                audience=audience,
+                audience=expected_audience,
                 options={
                     "verify_signature": True,
-                    "verify_aud": False,  # Disable auto-validation, will check manually
+                    "verify_aud": True,
                     "verify_exp": True,
                     "verify_nbf": True,
                     "verify_iat": True,
-                    "verify_iss": False,  # Allow flexible issuer
-                    "verify_sub": False,
+                    "verify_iss": True,
                 },
+                issuer="tradesage-auth-service",
             )
 
-            # Manual audience validation
-            token_audience = payload.get('aud')
-            logger.info(f"--- P3 DEBUG: Manual validation. Token aud: '{token_audience}', Expected aud: '{audience}'")
-            if token_audience != audience:
-                logger.error(f"Audience mismatch. Token: '{token_audience}', Expected: '{audience}'")
+            # Manual validation for token_type
+            token_type = payload.get('token_type')
+            if token_type != expected_token_type:
+                logger.error(f"Token type mismatch. Expected '{expected_token_type}', but got '{token_type}'")
                 return None
 
-            # Validate required fields
             if not payload.get("user_id"):
                 logger.error("Token missing required user_id field")
                 return None
 
             logger.debug(f"Token decoded successfully. User ID: {payload.get('user_id')}")
-            logger.debug(f"Token audience verified: {payload.get('aud')}")
-            # Include jti explicitly in TokenData
-            token_data_dict = dict(payload)
-            token_data_dict["jti"] = payload.get("jti")
-            return TokenData(**token_data_dict)
+            return TokenData(**payload)
 
         except jwt.ExpiredSignatureError:
             logger.warning("Token has expired")
             return None
-
         except jwt.JWTClaimsError as e:
             logger.error(f"JWT claims validation error: {e}")
             return None
-
-        except UnicodeDecodeError as e:
-            logger.error(f"Token contains invalid UTF-8 data: {e}")
-            logger.error("This indicates a corrupted or malformed token")
-            return None
-
-        except ValueError as e:
-            logger.error(f"Token value error: {e}")
-            return None
-
         except jwt.JWTError as e:
             logger.error(f"JWT decoding error: {type(e).__name__}: {e}")
             return None
-
         except Exception as e:
             logger.error(f"Unexpected error during token decoding: {type(e).__name__}: {e}")
             return None

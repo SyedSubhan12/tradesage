@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Request, Response
 from fastapi.security import OAuth2PasswordRequestForm
+from common.rate_limiter import rate_limiter, get_rate_limit
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from datetime import timedelta, datetime, timezone
@@ -94,6 +95,7 @@ async def confirm_password_reset_form_placeholder():
 
 
 @router.post("/token", response_model=TokenResponse)
+@rate_limiter.limit(get_rate_limit("auth", "login"))
 async def login_for_access_token(
     request: Request, # Added Request
     response: Response,
@@ -333,8 +335,10 @@ async def logout(
         session_id_to_revoke = None
         if token:
             try:
-                payload = auth_manager.decode_token(token)
-                session_id_to_revoke = payload.session_id
+                # Explicitly decode as an access token to get session_id
+                payload = auth_manager.decode_token(token, is_refresh=False)
+                if payload:
+                    session_id_to_revoke = payload.session_id
             except Exception as e:
                 logger.warning(f"Error decoding token during logout for user {current_user.email}: {e}")
 
@@ -623,13 +627,18 @@ async def change_password(
         await db.rollback()
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error")
 
-@router.post("/password/reset-request")
+@router.post("/password-reset/request")
+@rate_limiter.limit(get_rate_limit("auth", "password_reset"))
 async def request_password_reset(
-    request_data: PasswordReset, # Changed from reset_request to avoid conflict with fastapi.Request
+    request: Request,  # Required by rate limiter
+    request_data: PasswordReset,
     background_tasks: BackgroundTasks,
-    http_request: Request, # Added http_request for IP
+    http_request: Request = None,  # Keep for backward compatibility
     db: AsyncSession = Depends(db_manager.get_session)
 ):
+    # Ensure http_request is set for backward compatibility
+    if http_request is None:
+        http_request = request
     try:
         user_query = select(User).where(User.email == request_data.email)
         result = await db.execute(user_query)

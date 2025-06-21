@@ -12,7 +12,9 @@ import logging
 import json
 import httpx
 from urllib.parse import urlencode, urlparse, parse_qs, urlunparse
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, cast
+
+from common.circuit_breaker import CircuitBreakers, CircuitBreakerError
 
 from common.database import db_manager
 from common.auth import auth_manager
@@ -203,21 +205,91 @@ async def delete_oauth_client(
     return {"message": "OAuth client deleted successfully"}
 
 # Google OAuth Endpoints
+@CircuitBreakers.oauth_provider()
+async def exchange_google_code_for_token(client: httpx.AsyncClient, code: str) -> dict[str, Any]:
+    """Exchange Google OAuth code for access token with circuit breaker protection."""
+    try:
+        # Use the correct settings from config
+        client_id = settings.google_client_id or settings.GOOGLE_OAUTH_CLIENT_ID
+        client_secret = settings.google_client_secret or settings.GOOGLE_OAUTH_CLIENT_SECRET
+        redirect_uri = settings.google_redirect_uri or settings.GOOGLE_OAUTH_REDIRECT_URI
+        
+        if not client_id or not client_secret or not redirect_uri:
+            logger.error("Google OAuth credentials not properly configured")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="OAuth configuration error"
+            )
+            
+        token_url = settings.google_token_uri
+        data = {
+            "code": code,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uri": redirect_uri,
+            "grant_type": "authorization_code"
+        }
+        
+        logger.debug(f"Exchanging Google OAuth code. URL: {token_url}, Redirect URI: {redirect_uri}")
+        response = await client.post(token_url, data=data, timeout=10.0)
+        
+        # Log the full error response for debugging
+        if response.status_code != 200:
+            error_detail = response.text
+            logger.error(f"Google OAuth token exchange failed: {response.status_code} - {error_detail}")
+            
+        response.raise_for_status()
+        return cast(dict[str, Any], response.json())
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error during Google OAuth token exchange: {str(e)}")
+        if hasattr(e, 'response') and e.response:
+            logger.error(f"Response content: {e.response.text}")
+        raise
+    except Exception as e:
+        logger.error(f"Failed to exchange Google OAuth code: {str(e)}", exc_info=True)
+        raise
+
+@CircuitBreakers.oauth_provider()
+async def get_google_user_info(client: httpx.AsyncClient, access_token: str) -> dict[str, Any]:
+    """Fetch Google user info with circuit breaker protection."""
+    try:
+        user_info_url = "https://www.googleapis.com/oauth2/v2/userinfo"
+        headers = {"Authorization": f"Bearer {access_token}"}
+        response = await client.get(user_info_url, headers=headers, timeout=10.0)
+        response.raise_for_status()
+        return cast(dict[str, Any], response.json())
+    except Exception as e:
+        logger.error(f"Failed to fetch Google user info: {str(e)}", exc_info=True)
+        raise
+
+
 @router.get("/login/google")
 async def login_google():
     """
     Initiate Google OAuth flow by redirecting to Google's OAuth consent screen
     """
+    # Get the correct client ID and redirect URI from settings
+    client_id = settings.google_client_id or settings.GOOGLE_OAUTH_CLIENT_ID
+    redirect_uri = settings.google_redirect_uri or settings.GOOGLE_OAUTH_REDIRECT_URI
+    
+    if not client_id or not redirect_uri:
+        logger.error("Google OAuth client_id or redirect_uri not configured")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="OAuth configuration error"
+        )
+    
     # Build the Google OAuth URL
     params = {
-        'client_id': settings.google_client_id,
+        'client_id': client_id,
         'response_type': 'code',
         'scope': 'openid email profile',
-        'redirect_uri': settings.google_redirect_uri,
+        'redirect_uri': redirect_uri,
         'access_type': 'offline',  # Request refresh token
         'prompt': 'consent',  # Force consent screen to get refresh token
     }
     
+    logger.debug(f"Initiating Google OAuth flow with client_id: {client_id}, redirect_uri: {redirect_uri}")
     google_auth_url = f"{settings.google_auth_uri}?{urlencode(params)}"
     return RedirectResponse(url=google_auth_url)
 
@@ -239,38 +311,30 @@ async def google_callback(
 
     try:
         # Exchange authorization code for tokens
-        async with httpx.AsyncClient() as client:
-            # Get access token
-            token_response = await client.post(
-                settings.google_token_uri,
-                data={
-                    'code': code,
-                    'client_id': settings.google_client_id,
-                    'client_secret': settings.google_client_secret,
-                    'redirect_uri': settings.google_redirect_uri,
-                    'grant_type': 'authorization_code',
-                },
-                headers={
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                }
+        try:
+            async with httpx.AsyncClient() as client:
+                token_data = await exchange_google_code_for_token(client, code)
+                user_data = await get_google_user_info(client, token_data['access_token'])
+        except CircuitBreakerError as e:
+            logger.error(f"Circuit breaker open for Google OAuth: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Service temporarily unavailable. Please try again later."
             )
-            
-            token_data = token_response.json()
-            if 'error' in token_data:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Failed to get access token: {token_data.get('error_description', 'Unknown error')}"
-                )
-            
-            # Get user info
-            user_response = await client.get(
-                settings.google_user_info_uri,
-                headers={
-                    'Authorization': f"Bearer {token_data['access_token']}"
-                }
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Google OAuth service is currently unavailable. Please try again later."
             )
-            user_data = user_response.json()
-            
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error during Google OAuth flow: {e.response.text}")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Error communicating with Google OAuth service."
+            )
+        else:
+            # ---------------------
+            # User processing logic
+            # ---------------------
             # Check if user exists by email
             user = await get_user_by_username_or_email(db, user_data['email'])
             
@@ -641,24 +705,42 @@ async def token(
         
         if not refresh_token:
             raise HTTPException(status_code=400, detail="Refresh token required")
-        
-        # Validate refresh token
+
+        # First, decode the token to validate signature, expiry, audience, and type
+        try:
+            payload = auth_manager.decode_token(refresh_token, is_refresh=True)
+            if not payload or not payload.user_id:
+                raise HTTPException(status_code=400, detail="Invalid refresh token payload")
+        except Exception: # Catches JWTError from decode_token
+             raise HTTPException(status_code=400, detail="Invalid or expired refresh token")
+
+        # Second, check if the token is revoked in the database (rotation)
         refresh_token_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
         result = await db.execute(
             select(RefreshToken).where(
                 RefreshToken.token == refresh_token_hash,
                 RefreshToken.client_id == client.id,
-                RefreshToken.expires_at > datetime.now(timezone.utc),
+                RefreshToken.user_id == payload.user_id,
                 RefreshToken.revoked == False
             )
         )
         token_record = result.scalar_one_or_none()
-        
+
         if not token_record:
+            # This could mean the token was already used (rotated)
+            await log_audit_event(
+                event_type="oauth_revoked_token_used",
+                user_id=str(payload.user_id),
+                details={
+                    "client_id": client_id,
+                    "reason": "Attempt to use a revoked or invalid refresh token.",
+                    "client_ip": request.client.host
+                }
+            )
             raise HTTPException(status_code=400, detail="Invalid or expired refresh token")
-        
+
         # Get user
-        user = await get_user_by_id(db, token_record.user_id)
+        user = await get_user_by_id(db, payload.user_id)
         if not user:
             raise HTTPException(status_code=400, detail="User not found")
         
