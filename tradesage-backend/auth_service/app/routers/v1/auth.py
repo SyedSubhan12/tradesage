@@ -908,7 +908,7 @@ async def logout(
             if token:
                 try:
                     payload = auth_manager.decode_token(token, is_refresh=False)
-                    session_id_to_revoke = payload.get("session_id")
+                    session_id_to_revoke = payload.session_id
                 except TokenExpiredError:
                     debug_logger.warning(f"Expired token during logout for {current_user.email}")
                 except Exception as e:
