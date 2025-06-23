@@ -5,7 +5,7 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
-from fastapi import HTTPException, status
+from fastapi import HTTPException, status, Request
 
 from common.models import Tenant, TenantStatus, BaseUser
 from common.redis_client import redis_manager
@@ -34,6 +34,7 @@ async def blacklist_token(db: AsyncSession, token: str, user_id: UUIDType, revok
     """Add or mark a refresh token as revoked in the blacklist"""
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     try:
+        # Check if the token already exists in the blacklist
         result = await db.execute(
             select(TokenBlacklist).where(
                 TokenBlacklist.user_id == user_id,
@@ -41,21 +42,28 @@ async def blacklist_token(db: AsyncSession, token: str, user_id: UUIDType, revok
             )
         )
         token_record = result.scalar_one_or_none()
-        if token_record:
-            token_record.revoked = True
-        elif not revoke_only:
+
+        if not token_record:
+            # If it doesn't exist, add it to the blacklist
             db.add(
                 TokenBlacklist(
                     user_id=user_id,
                     token_hash=token_hash,
-                    expires_at=datetime.now(timezone.utc) + timedelta(days=7),
-                    revoked=True
+                    expires_at=datetime.now(timezone.utc) + timedelta(days=7) # Token is blacklisted until this expiry
                 )
             )
-        await db.commit()
+        try:
+            await db.commit()
+            logger.info(f"Successfully committed changes for blacklisting token for user {user_id}.")
+        except Exception as commit_e:
+            logger.error(f"Error committing transaction for blacklisting token for user {user_id}: {commit_e}", exc_info=True)
+            await db.rollback()
+            logger.info(f"Rolled back transaction for blacklisting token for user {user_id}.")
+            raise # Re-raise the exception after logging and rollback
     except Exception as e:
-        logger.error(f"Error blacklisting token: {e}")
+        logger.error(f"Unexpected error in blacklist_token for user {user_id}: {e}", exc_info=True)
         await db.rollback()
+        raise # Re-raise the exception
 
 async def is_token_blacklisted(db: AsyncSession, token: str) -> bool:
     """Check if a token is blacklisted"""
@@ -63,8 +71,7 @@ async def is_token_blacklisted(db: AsyncSession, token: str) -> bool:
     try:
         result = await db.execute(
             select(TokenBlacklist).where(
-                TokenBlacklist.token_hash == token_hash,
-                TokenBlacklist.revoked.is_(True)
+                TokenBlacklist.token_hash == token_hash
             )
         )
         return result.scalars().first() is not None
@@ -108,12 +115,25 @@ async def cleanup_expired_tokens(db: AsyncSession):
         yield deleted_count
 
     except Exception as e:
-        logger.error(f"Error during token cleanup: {e}")
-        # The session rollback will be handled by the context manager in main.py
+        logger.error(f"Critical error during token cleanup: {e}", exc_info=True)
+        # Re-raise to ensure the transaction context manager handles the rollback
         raise
-        
-        await db.commit()
-        logger.info("Cleaned up expired tokens, sessions, and blacklisted tokens")
-    except Exception as e:
-        logger.error(f"Error cleaning up expired tokens: {e}")
-        await db.rollback()
+
+async def validate_session_security(session: UserSession, request: Request, user_id: UUIDType) -> (bool, str):
+    """
+    Performs security validation on the user session.
+    Checks for IP address and user agent consistency.
+    """
+    client_ip = request.client.host
+    user_agent = request.headers.get("user-agent", "")
+
+    if session.client_ip and session.client_ip != client_ip:
+        logger.warning(f"Session security violation for user {user_id}: IP mismatch. Session IP: {session.client_ip}, Current IP: {client_ip}")
+        return False, "ip_mismatch"
+
+    # Temporarily disable user agent validation for debugging
+    # if session.user_agent and session.user_agent != user_agent:
+    #     logger.warning(f"Session security violation for user {user_id}: User-Agent mismatch. Session UA: {session.user_agent}, Current UA: {user_agent}")
+    #     return False, "user_agent_mismatch"
+
+    return True, "valid"

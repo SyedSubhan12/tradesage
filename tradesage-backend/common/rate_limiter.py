@@ -50,4 +50,4 @@ def get_rate_limit(scope: str, endpoint: str) -> Union[str, List[str]]:
         Union[str, List[str]]: Rate limit string or list of rate limit strings
     """
     limit = RATE_LIMITS.get(scope, {}).get(endpoint, RATE_LIMITS["api"]["default"])
-    return [limit] if isinstance(limit, str) else limit
+    return limit

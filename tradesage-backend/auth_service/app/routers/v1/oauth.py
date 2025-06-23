@@ -395,7 +395,7 @@ async def google_callback(
                 },
                 user_id=str(user.id),
                 session_id=session_id, # Pass as argument as well for clarity
-                expires_in=timedelta(minutes=settings.access_token_expire_minutes)
+                # expires_in=timedelta(minutes=settings.access_token_expire_minutes)
             )
             
             refresh_token = auth_manager.create_refresh_token(
@@ -446,9 +446,11 @@ async def google_callback(
                 user_id=user.id,
                 session_id=session_id,
                 refresh_token_hash=refresh_token_hash,
-                expires_at=datetime.now(timezone.utc) + timedelta(minutes=settings.access_token_expire_minutes),
+                expires_at=datetime.now(timezone.utc) + timedelta(days=auth_manager.refresh_token_expire_days),
                 client_ip=request.client.host if request else None,
                 user_agent=request.headers.get("user-agent") if request else None,
+                is_active=True,
+                last_used_at=datetime.now(timezone.utc)
             )
             db.add(new_session)
             await db.commit()

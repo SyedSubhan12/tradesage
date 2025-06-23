@@ -3,9 +3,11 @@ from sqlalchemy.orm import declarative_base
 from sqlalchemy import text
 import logging
 import sqlalchemy.exc
+from common.audit import AuditLog  # Import AuditLog model
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from common.config import settings
 from typing import AsyncGenerator
+from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +102,33 @@ class DatabaseManager:
             await self._engine.dispose()
             self._engine = None
         logger.info("Database connection closed")
+
+    async def cleanup_expired_sessions(self):
+        """Cleanup expired sessions with detailed logging."""
+        try:
+            logger.info("Starting session cleanup job")
+            # Corrected async iteration
+            async for session in self.fetch_expired_sessions():
+                try:
+                    await self.delete_session(session.id)
+                    logger.debug(f"Deleted session: {session.id}")
+                except Exception as e:
+                    logger.error(f"Session deletion failed {session.id}: {e}")
+            logger.info("Session cleanup completed")
+        except Exception as e:
+            logger.error(f"Cleanup job failed: {e}")
+
+    @contextmanager
+    def transaction(self):
+        """Context manager for database transactions with rollback tracking."""
+        try:
+            yield
+            self.session.commit()
+            logger.debug("Transaction committed successfully")
+        except Exception as e:
+            self.session.rollback()
+            logger.error(f"Transaction rolled back: {e}", exc_info=True)
+            raise
 
 # Factory function to get DatabaseManager instance
 

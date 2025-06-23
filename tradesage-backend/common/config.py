@@ -24,7 +24,8 @@ class Settings(BaseSettings):
     jwt_public_key_path: str = "certs/ecdsa-public.pem"
 
     access_token_expire_minutes: int = 15  # 15 minutes
-    refresh_token_expire_days: int = 7  # 7 days
+    refresh_token_expire_days: int = 30  # 30 days
+    refresh_token_expire_minutes: Optional[int] = None # For testing, allows setting expiration in minutes
     jwt_issuer: str = "tradesage-auth-service"
     bcrypt_rounds: int = 12
 

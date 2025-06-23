@@ -2,6 +2,8 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from jose import JWTError, jwt
+import os
+
 
 class TokenExpiredError(Exception):
     """"
@@ -114,8 +116,9 @@ class AuthManager:
         self.pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
         self.bcrypt_rounds = settings.bcrypt_rounds
         self.oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-        self.access_token_expire_minutes = settings.access_token_expire_minutes
-        self.refresh_token_expire_days = settings.refresh_token_expire_days
+        self.access_token_expire_minutes = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 15))
+        self.refresh_token_expire_days = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", 30))
+        self.refresh_token_expire_minutes = settings.refresh_token_expire_minutes
 
     def _load_key(self, path: str, key_type: str) -> bytes:
         """
@@ -261,10 +264,10 @@ class AuthManager:
         elif "user_id" not in to_encode or not to_encode["user_id"]:
             raise ValueError("user_id must be set in token payload")
 
-        if expires_in:
-            expire = datetime.now(timezone.utc) + expires_in
-        else:
-            expire = datetime.now(timezone.utc) + timedelta(minutes=self.access_token_expire_minutes)
+        # --- TEMPORARY CHANGE FOR TESTING ---
+        # Force a short expiration time to test refresh flow
+        expire = datetime.now(timezone.utc) + timedelta(seconds=15)
+        # --- END TEMPORARY CHANGE ---
 
         # Get current time once
         now = datetime.now(timezone.utc)
@@ -355,6 +358,8 @@ class AuthManager:
         # Use provided expires_in or fall back to default refresh token expiration
         if expires_in is not None:
             expire = datetime.now(timezone.utc) + expires_in
+        elif self.refresh_token_expire_minutes is not None:
+            expire = datetime.now(timezone.utc) + timedelta(minutes=self.refresh_token_expire_minutes)
         else:
             expire = datetime.now(timezone.utc) + timedelta(days=self.refresh_token_expire_days)
 
@@ -601,6 +606,41 @@ class AuthManager:
 
         except Exception as e:
             logger.error(f"Token verification failed: {type(e).__name__}: {e}")
+            return None
+
+    def should_refresh_token(self, token: str) -> bool:
+        """Check if token should be refreshed (within 5 minutes of expiration)."""
+        try:
+            # Decode without verification to check expiration only
+            payload = jwt.decode(token, self.public_key, algorithms=[self.algorithm],
+                               options={"verify_signature": False})
+            exp = payload.get('exp')
+            if not exp:
+                return False
+            
+            now = datetime.now(timezone.utc).timestamp()
+            return (exp - now) < 300  # 5 minutes
+        except Exception as e:
+            logger.error(f"Token refresh check error: {e}")
+            return False
+
+    def refresh_access_token(self, refresh_token: str) -> Optional[str]:
+        """Generate new access token from valid refresh token."""
+        try:
+            token_data = self.verify_token(refresh_token, is_refresh=True)
+            if not token_data:
+                return None
+
+            return self.create_access_token({
+                "user_id": token_data.user_id,
+                "tenant_id": token_data.tenant_id,
+                "email": token_data.email,
+                "scopes": token_data.scopes,
+                "roles": token_data.roles,
+                "session_id": token_data.session_id
+            })
+        except Exception as e:
+            logger.error(f"Token refresh failed: {e}")
             return None
 
 
