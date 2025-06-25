@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Request, Response, Cookie
 from fastapi.security import OAuth2PasswordRequestForm
 from common.rate_limiter import rate_limiter, get_rate_limit
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,7 +13,8 @@ import hashlib
 import traceback
 from typing import Optional, Tuple
 
-from common.database import db_manager
+from common.database import db_manager, atomic_session_operation
+from common.config import settings
 from common.auth import auth_manager, TokenExpiredError
 from common.models import BaseUser, Tenant, TenantStatus, User
 from common.utils import get_user_by_username_or_email
@@ -26,8 +27,8 @@ from pydantic import EmailStr
 from contextlib import asynccontextmanager
 
 from auth_service.app.models.password_reset_token_models import PasswordResetToken
-from auth_service.app.models.user_session import UserSession
 from auth_service.app.models.token_blacklist import TokenBlacklist
+from auth_service.app.clients.session_client import session_service_client
 from auth_service.app.dependencies import get_current_active_user
 from auth_service.app.services.auth_service import validate_session_security, is_token_blacklisted
 
@@ -50,29 +51,7 @@ formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(messag
 console_handler.setFormatter(formatter)
 debug_logger.addHandler(console_handler)
 
-@asynccontextmanager
-async def atomic_session_operation(db: AsyncSession):
-    """
-    Context manager for atomic database operations with comprehensive error handling
-    """
-    try:
-        debug_logger.debug("Starting atomic database transaction")
-        yield db
-        await db.commit()
-        debug_logger.debug("Database transaction committed successfully")
-    except SQLAlchemyError as e:
-        debug_logger.error(f"Database error in transaction: {e}")
-        debug_logger.error(f"Traceback: {traceback.format_exc()}")
-        await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Database operation failed"
-        )
-    except Exception as e:
-        debug_logger.error(f"Unexpected error in transaction: {e}")
-        debug_logger.error(f"Traceback: {traceback.format_exc()}")
-        await db.rollback()
-        raise
+
 
 async def store_refresh_token_securely(session_id: str, refresh_token: str, expiry_seconds: int) -> bool:
     try:
@@ -108,27 +87,29 @@ async def delete_refresh_token_securely(session_id: str) -> bool:
         debug_logger.error(f"Traceback: {traceback.format_exc()}")
         return False
 
-async def invalidate_user_sessions(db: AsyncSession, user_id: str, current_session_id: str = None) -> bool:
+async def invalidate_user_sessions(user_id: str, current_session_id: str = None) -> bool:
     try:
-        debug_logger.debug(f"Invalidating sessions for user {user_id}")
-        query = update(UserSession).where(
-            UserSession.user_id == user_id,
-            UserSession.is_active == True
-        )
-        if current_session_id:
-            query = query.where(UserSession.session_id != current_session_id)
-        query = query.values(
-            is_active=False,
-            logged_out_at=datetime.now(timezone.utc)
-        )
-        result = await db.execute(query)
-        await db.commit()
-        debug_logger.debug(f"Invalidated {result.rowcount} sessions")
+        debug_logger.debug(f"Invalidating sessions for user {user_id} via session service")
+        sessions = await session_service_client.get_user_sessions(user_id)
+        if sessions is None:
+            debug_logger.warning(f"Could not retrieve sessions for user {user_id} to invalidate.")
+            return False
+
+        invalidation_count = 0
+        for session in sessions:
+            session_token = session.get("session_token")
+            if session_token and session_token != current_session_id:
+                success = await session_service_client.terminate_session(session_token)
+                if success:
+                    invalidation_count += 1
+                else:
+                    debug_logger.warning(f"Failed to terminate session {session_token} for user {user_id}")
+        
+        debug_logger.debug(f"Invalidated {invalidation_count} sessions for user {user_id}")
         return True
     except Exception as e:
-        debug_logger.error(f"Failed to invalidate sessions: {e}")
+        debug_logger.error(f"Failed to invalidate sessions for user {user_id}: {e}")
         debug_logger.error(f"Traceback: {traceback.format_exc()}")
-        await db.rollback()
         return False
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
@@ -191,222 +172,233 @@ async def login_for_access_token(
     db: AsyncSession = Depends(db_manager.get_session)
 ):
     debug_logger.debug(f"Login attempt for {form_data.username}")
-    async with atomic_session_operation(db) as transaction_db:
-        try:
-            user = await get_user_by_username_or_email(transaction_db, username=form_data.username)
-            if not user:
-                await log_audit_event(
-                    event_type="login_failed_non_existent_user",
-                    user_id=None,
-                    details={
-                        "email_attempted": form_data.username,
-                        "client_ip": request.client.host,
-                        "reason": "non_existent_user"
-                    }
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Incorrect email or password",
-                    headers={"WWW-Authenticate": "Bearer"}
-                )
-
-            if not user.tenant_id:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="User configuration error"
-                )
-
-            tenant = await transaction_db.get(Tenant, user.tenant_id)
-            if not tenant or tenant.status != TenantStatus.ACTIVE:
-                await log_audit_event(
-                    event_type="login_failed_inactive_tenant",
-                    user_id=str(user.id),
-                    details={
-                        "email": user.email,
-                        "client_ip": request.client.host,
-                        "tenant_id": str(user.tenant_id),
-                        "tenant_status": tenant.status.value if tenant else 'None',
-                        "reason": "inactive_tenant"
-                    }
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Tenant account is {(tenant.status.value.lower() if tenant else 'invalid')}"
-                )
-
-            if user.locked_until and user.locked_until > datetime.now(timezone.utc):
-                await log_audit_event(
-                    event_type="login_failed_account_locked",
-                    user_id=str(user.id),
-                    details={
-                        "email": user.email,
-                        "client_ip": request.client.host,
-                        "locked_until": user.locked_until.isoformat(),
-                        "reason": "account_locked"
-                    }
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_423_LOCKED,
-                    detail=f"Account locked. Try again after {user.locked_until.isoformat()}"
-                )
-
-            if not auth_manager.verify_password(form_data.password, user.hashed_password):
-                user.failed_login_attempts += 1
-                lockout_duration = timedelta()
-                event_details_update = {}
-
-                if user.failed_login_attempts >= 15:
-                    user.locked_until = datetime.max.replace(tzinfo=timezone.utc)
-                    await log_audit_event(
-                        event_type="account_locked_permanently",
-                        user_id=str(user.id),
-                        details={
-                            "email": user.email,
-                            "client_ip": request.client.host,
-                            "failed_attempts": user.failed_login_attempts,
-                            "reason": "excessive_failed_attempts_permanent"
-                        }
-                    )
-                    event_details_update["lockout_status"] = "permanent"
-                elif user.failed_login_attempts >= 10:
-                    lockout_duration = timedelta(hours=24)
-                elif user.failed_login_attempts >= 7:
-                    lockout_duration = timedelta(minutes=30)
-                elif user.failed_login_attempts >= 5:
-                    lockout_duration = timedelta(minutes=5)
-                elif user.failed_login_attempts >= 3:
-                    lockout_duration = timedelta(minutes=1)
-
-                if lockout_duration.total_seconds() > 0 and user.locked_until != datetime.max.replace(tzinfo=timezone.utc):
-                    user.locked_until = datetime.now(timezone.utc) + lockout_duration
-                    await log_audit_event(
-                        event_type="account_locked_temporarily",
-                        user_id=str(user.id),
-                        details={
-                            "email": user.email,
-                            "client_ip": request.client.host,
-                            "failed_attempts": user.failed_login_attempts,
-                            "lockout_duration_minutes": lockout_duration.total_seconds() / 60,
-                            "locked_until": user.locked_until.isoformat()
-                        }
-                    )
-                    event_details_update["lockout_status"] = "temporary"
-                    event_details_update["locked_until"] = user.locked_until.isoformat()
-
-                await log_audit_event(
-                    event_type="login_failed",
-                    user_id=str(user.id),
-                    details={
-                        "email": user.email,
-                        "client_ip": request.client.host,
-                        "reason": "incorrect_password",
-                        "failed_attempts_count": user.failed_login_attempts,
-                        **event_details_update
-                    }
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Incorrect email or password",
-                    headers={"WWW-Authenticate": "Bearer"}
-                )
-
-            user.failed_login_attempts = 0
-            user.locked_until = None
-            user.last_login_at = datetime.now(timezone.utc)
-
-            access_token_expires = timedelta(minutes=auth_manager.access_token_expire_minutes)
-            session_id = str(uuid4())
-            token_data = {
-                "sub": str(user.id),
-                "user_id": str(user.id),
-                "email": user.email,
-                "tenant_id": str(user.tenant_id),
-                "session_id": session_id,
-                "iat": datetime.now(timezone.utc),
-                "exp": datetime.now(timezone.utc) + access_token_expires
-            }
-
-            access_token = auth_manager.create_access_token(
-                data=token_data,
-                expires_in=access_token_expires,
-                tenant_id=str(user.tenant_id),
-                roles=[user.role.value],
-                scopes=[],
-                session_id=session_id
-            )
-
-            refresh_token_raw = auth_manager.create_refresh_token(
-                data=token_data,
-                tenant_id=str(user.tenant_id),
-                roles=[user.role.value],
-                scopes=[],
-                session_id=session_id
-            )
-
-            if not refresh_token_raw:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Failed to generate refresh token"
-                )
-
-            refresh_token_hash = hashlib.sha256(refresh_token_raw.encode()).hexdigest()
-            refresh_expires_at = datetime.now(timezone.utc) + timedelta(days=auth_manager.refresh_token_expire_days)
-
-            new_session = UserSession(
-                user_id=user.id,
-                session_id=session_id,
-                refresh_token_hash=refresh_token_hash,
-                expires_at=refresh_expires_at,
-                client_ip=request.client.host,
-                user_agent=request.headers.get("user-agent"),
-                is_active=True
-            )
-            transaction_db.add(new_session)
-
-            await store_refresh_token_securely(
-                session_id,
-                refresh_token_raw,
-                int(auth_manager.refresh_token_expire_days * 24 * 60 * 60)
-            )
-
+    try:
+        user = await get_user_by_username_or_email(db, username=form_data.username)
+        if not user or not user.is_active:
             await log_audit_event(
-                event_type="user_login_success",
+                event_type="login_failed_non_existent_user",
+                user_id=None,
+                details={
+                    "email_attempted": form_data.username,
+                    "client_ip": request.client.host,
+                    "reason": "non_existent_or_inactive_user"
+                }
+            )
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect email or password",
+                headers={"WWW-Authenticate": "Bearer"}
+            )
+
+        tenant = await db.get(Tenant, user.tenant_id)
+        if not tenant or tenant.status != TenantStatus.ACTIVE:
+            await log_audit_event(
+                event_type="login_failed_inactive_tenant",
                 user_id=str(user.id),
                 details={
                     "email": user.email,
                     "client_ip": request.client.host,
                     "tenant_id": str(user.tenant_id),
-                    "tenant_status": tenant.status.value,
-                    "session_id": session_id
+                    "tenant_status": tenant.status.value if tenant else 'None',
+                    "reason": "inactive_tenant"
                 }
             )
-
-            response.set_cookie(
-                key="refresh_token",
-                value=refresh_token_raw,
-                httponly=True,
-                secure=True,
-                samesite="lax",
-                path="/auth",
-                expires=refresh_expires_at
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Tenant account is {(tenant.status.value.lower() if tenant else 'invalid')}"
             )
 
-            return TokenResponse(
-                access_token=access_token,
-                token_type="bearer",
-                expires_in=int(access_token_expires.total_seconds()),
-                tenant_status=tenant.status.value
+        if user.locked_until and user.locked_until > datetime.now(timezone.utc):
+            await log_audit_event(
+                event_type="login_failed_account_locked",
+                user_id=str(user.id),
+                details={
+                    "email": user.email,
+                    "client_ip": request.client.host,
+                    "locked_until": user.locked_until.isoformat(),
+                    "reason": "account_locked"
+                }
+            )
+            raise HTTPException(
+                status_code=status.HTTP_423_LOCKED,
+                detail=f"Account locked. Try again after {user.locked_until.isoformat()}"
             )
 
-        except HTTPException:
-            raise
-        except Exception as e:
-            debug_logger.error(f"Login error: {e}")
-            debug_logger.error(f"Traceback: {traceback.format_exc()}")
+        if not auth_manager.verify_password(form_data.password, user.hashed_password):
+            user.failed_login_attempts += 1
+            lockout_duration = timedelta()
+            event_details_update = {}
+
+            if user.failed_login_attempts >= 15:
+                user.locked_until = datetime.max.replace(tzinfo=timezone.utc)
+                await log_audit_event(
+                    event_type="account_locked_permanently",
+                    user_id=str(user.id),
+                    details={
+                        "email": user.email,
+                        "client_ip": request.client.host,
+                        "failed_attempts": user.failed_login_attempts,
+                        "reason": "excessive_failed_attempts_permanent"
+                    }
+                )
+                event_details_update["lockout_status"] = "permanent"
+            elif user.failed_login_attempts >= 10:
+                lockout_duration = timedelta(hours=24)
+            elif user.failed_login_attempts >= 7:
+                lockout_duration = timedelta(minutes=30)
+            elif user.failed_login_attempts >= 5:
+                lockout_duration = timedelta(minutes=5)
+            elif user.failed_login_attempts >= 3:
+                lockout_duration = timedelta(minutes=1)
+
+            if lockout_duration.total_seconds() > 0 and user.locked_until != datetime.max.replace(tzinfo=timezone.utc):
+                user.locked_until = datetime.now(timezone.utc) + lockout_duration
+                await log_audit_event(
+                    event_type="account_locked_temporarily",
+                    user_id=str(user.id),
+                    details={
+                        "email": user.email,
+                        "client_ip": request.client.host,
+                        "failed_attempts": user.failed_login_attempts,
+                        "lockout_duration_minutes": lockout_duration.total_seconds() / 60,
+                        "locked_until": user.locked_until.isoformat()
+                    }
+                )
+                event_details_update["lockout_status"] = "temporary"
+                event_details_update["locked_until"] = user.locked_until.isoformat()
+
+            await log_audit_event(
+                event_type="login_failed",
+                user_id=str(user.id),
+                details={
+                    "email": user.email,
+                    "client_ip": request.client.host,
+                    "reason": "incorrect_password",
+                    "failed_attempts_count": user.failed_login_attempts,
+                    **event_details_update
+                }
+            )
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect email or password",
+                headers={"WWW-Authenticate": "Bearer"}
+            )
+
+        user.failed_login_attempts = 0
+        user.locked_until = None
+        user.last_login_at = datetime.now(timezone.utc)
+
+        new_session_data = await session_service_client.create_session(
+            user_id=user.id,
+            client_ip=request.client.host,
+            user_agent=request.headers.get("user-agent"),
+            initial_data={}
+        )
+        if not new_session_data or "session_token" not in new_session_data:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Internal server error"
+                detail="Failed to create user session"
             )
+        
+        session_token = new_session_data["session_token"]
+
+        access_token_expires = timedelta(minutes=auth_manager.access_token_expire_minutes)
+        token_data = {
+            "sub": str(user.id),
+            "user_id": str(user.id),
+            "email": user.email,
+            "tenant_id": str(user.tenant_id),
+            "session_id": session_token,
+            "iat": datetime.now(timezone.utc),
+            "exp": datetime.now(timezone.utc) + access_token_expires
+        }
+
+        access_token = auth_manager.create_access_token(
+            data=token_data,
+            expires_in=access_token_expires,
+            tenant_id=str(user.tenant_id),
+            roles=[user.role.value],
+            scopes=[],
+            session_id=session_token
+        )
+
+        refresh_token_raw = auth_manager.create_refresh_token(
+            data=token_data,
+            tenant_id=str(user.tenant_id),
+            roles=[user.role.value],
+            scopes=[],
+            session_id=session_token
+        )
+
+        if not refresh_token_raw:
+            await session_service_client.terminate_session(session_token)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to generate refresh token"
+            )
+        
+        refresh_token_hash = hashlib.sha256(refresh_token_raw.encode()).hexdigest()
+        refresh_expires_at = datetime.now(timezone.utc) + timedelta(days=auth_manager.refresh_token_expire_days)
+
+        update_success = await session_service_client.update_session(
+            session_token=session_token,
+            data={
+                "refresh_token_hash": refresh_token_hash,
+                "expires_at": refresh_expires_at.isoformat()
+            }
+        )
+
+        if not update_success:
+            await session_service_client.terminate_session(session_token)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to finalize user session"
+            )
+
+        await store_refresh_token_securely(
+            session_token,
+            refresh_token_raw,
+            int(auth_manager.refresh_token_expire_days * 24 * 60 * 60)
+        )
+
+        await log_audit_event(
+            event_type="user_login_success",
+            user_id=str(user.id),
+            details={
+                "email": user.email,
+                "client_ip": request.client.host,
+                "tenant_id": str(user.tenant_id),
+                "tenant_status": tenant.status.value,
+                "session_id": session_token
+            }
+        )
+
+        response.set_cookie(
+            key="refresh_token",
+            value=refresh_token_raw,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+            path="/auth",
+            expires=refresh_expires_at
+        )
+
+        return TokenResponse(
+            access_token=access_token,
+            token_type="bearer",
+            expires_in=int(settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+            tenant_status=tenant.status.value
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        debug_logger.error(f"Login error: {e}")
+        debug_logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred during login."
+        )
 
 @router.post("/refresh", response_model=TokenResponse)
 @rate_limiter.limit(get_rate_limit("auth", "refresh"))
@@ -419,8 +411,9 @@ async def refresh_access_token(
     user_agent = request.headers.get("user-agent", "")
     debug_logger.info(f"Token refresh attempt from IP: {client_ip}")
 
-    async with atomic_session_operation(db) as transaction_db:
-        try:
+    token_data = None
+    try:
+        async with atomic_session_operation(db) as transaction_db:
             refresh_token_raw = request.cookies.get("refresh_token")
             if not refresh_token_raw:
                 auth_header = request.headers.get("Authorization")
@@ -430,142 +423,165 @@ async def refresh_access_token(
                     await log_audit_event(
                         event_type="token_refresh_failed",
                         user_id=None,
-                        details={"client_ip": client_ip, "reason": "no_refresh_token"}
+                        details={"client_ip": client_ip, "reason": "no_refresh_token"},
                     )
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
                         detail="Refresh token required",
-                        headers={"WWW-Authenticate": "Bearer"}
+                        headers={"WWW-Authenticate": "Bearer"},
                     )
 
             try:
                 token_data = auth_manager.decode_token(refresh_token_raw, is_refresh=True)
                 if not token_data.user_id or not token_data.session_id:
                     raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="Invalid refresh token payload"
+                        status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token payload"
                     )
             except TokenExpiredError:
                 await log_audit_event(
                     event_type="token_refresh_failed",
-                    user_id=None,
-                    details={"client_ip": client_ip, "reason": "refresh_token_expired"}
+                    user_id=getattr(token_data, 'user_id', None),
+                    details={"client_ip": client_ip, "reason": "refresh_token_expired"},
                 )
                 raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Refresh token has expired"
+                    status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token has expired"
                 )
             except Exception as e:
                 await log_audit_event(
                     event_type="token_refresh_failed",
                     user_id=None,
-                    details={"client_ip": client_ip, "reason": "invalid_refresh_token", "error": str(e)}
+                    details={"client_ip": client_ip, "reason": "invalid_refresh_token", "error": str(e)},
                 )
                 raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Invalid refresh token"
+                    status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token"
                 )
 
             user_id = token_data.user_id
             session_id = token_data.session_id
 
-            refresh_token_hash = hashlib.sha256(refresh_token_raw.encode()).hexdigest()
-            result = await transaction_db.execute(
-                select(UserSession).where(
-                    UserSession.session_id == session_id,
-                    UserSession.user_id == user_id,
-                    UserSession.refresh_token_hash == refresh_token_hash,
-                    UserSession.is_active == True,
-                    UserSession.expires_at > datetime.now(timezone.utc)
-                )
-            )
-            session = result.scalar_one_or_none()
+            session_data = await session_service_client.get_session(session_id)
 
-            if not session:
-                # Debugging: Check why the session lookup failed
-                debug_logger.warning(f"Session lookup failed for session_id: {session_id}. Starting detailed check.")
-                
-                # Check for session by session_id and user_id to get more details
-                debug_session_result = await transaction_db.execute(
-                    select(UserSession).where(UserSession.session_id == session_id, UserSession.user_id == user_id)
+            if not session_data:
+                reason = "session_not_found"
+                details = {"client_ip": client_ip, "session_id": session_id, "failure_reason": reason}
+                debug_logger.error(f"Token refresh failed. Details: {details}")
+                await log_audit_event(event_type="token_refresh_failed", user_id=user_id, details=details)
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Invalid or expired session: {reason}"
                 )
-                debug_session = debug_session_result.scalar_one_or_none()
 
-                reason = "invalid_session_or_token"
+            if not session_data.get("is_active"):
+                reason = "session_is_inactive"
+                details = {"client_ip": client_ip, "session_id": session_id, "failure_reason": reason}
+                debug_logger.error(f"Token refresh failed. Details: {details}")
+                await log_audit_event(event_type="token_refresh_failed", user_id=user_id, details=details)
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Invalid or expired session: {reason}"
+                )
+
+            try:
+                expires_raw = session_data.get("expires_at")
+                if isinstance(expires_raw, datetime):
+                    expires_at = expires_raw if expires_raw.tzinfo else expires_raw.replace(tzinfo=timezone.utc)
+                elif isinstance(expires_raw, str):
+                    expires_str = expires_raw.replace("Z", "+00:00")
+                    expires_at = datetime.fromisoformat(expires_str)
+                    if expires_at.tzinfo is None:
+                        expires_at = expires_at.replace(tzinfo=timezone.utc)
+                else:
+                    raise ValueError("Invalid expires_at value")
+                if expires_at <= datetime.now(timezone.utc):
+                    raise ValueError("Session expired")
+            except (ValueError, TypeError):
+                reason = "session_has_expired"
                 details = {
                     "client_ip": client_ip,
                     "session_id": session_id,
-                    "searched_for_user_id": user_id,
+                    "failure_reason": reason,
+                    "expires_at": session_data.get("expires_at"),
                 }
-
-                if debug_session:
-                    incoming_hash = hashlib.sha256(refresh_token_raw.encode()).hexdigest()
-                    details["db_session_found"] = True
-                    details["db_session_is_active"] = debug_session.is_active
-                    details["db_session_expires_at"] = debug_session.expires_at.isoformat()
-                    details["db_session_hash_matches"] = (debug_session.refresh_token_hash == incoming_hash)
-                    details["db_now_utc"] = datetime.now(timezone.utc).isoformat()
-
-                    if not debug_session.is_active:
-                        reason = "session_is_inactive"
-                    elif debug_session.expires_at <= datetime.now(timezone.utc):
-                        reason = "session_has_expired"
-                    elif debug_session.refresh_token_hash != incoming_hash:
-                        reason = "refresh_token_hash_mismatch"
-                else:
-                    details["db_session_found"] = False
-                    reason = "no_session_found_for_user"
-
-                details["failure_reason"] = reason
-                
                 debug_logger.error(f"Token refresh failed. Details: {details}")
-
-                await log_audit_event(
-                    event_type="token_refresh_failed",
-                    user_id=user_id,
-                    details=details
-                )
+                await log_audit_event(event_type="token_refresh_failed", user_id=user_id, details=details)
+                await session_service_client.terminate_session(session_id)
                 raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail=f"Invalid or expired session: {reason}"
+                    status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Invalid or expired session: {reason}"
                 )
 
-            is_valid, reason = await validate_session_security(session, request, user_id)
+            refresh_token_hash = hashlib.sha256(refresh_token_raw.encode()).hexdigest()
+            current_hash = session_data.get("refresh_token_hash")
+            previous_hash = session_data.get("previous_refresh_token_hash")
+
+            previous_expires_raw = session_data.get("previous_refresh_token_expires_at")
+            previous_hash_expires_at = None
+            if isinstance(previous_expires_raw, datetime):
+                previous_hash_expires_at = (
+                    previous_expires_raw
+                    if previous_expires_raw.tzinfo
+                    else previous_expires_raw.replace(tzinfo=timezone.utc)
+                )
+            elif isinstance(previous_expires_raw, str):
+                try:
+                    expires_str = previous_expires_raw.replace("Z", "+00:00")
+                    previous_hash_expires_at = datetime.fromisoformat(expires_str)
+                    if previous_hash_expires_at.tzinfo is None:
+                        previous_hash_expires_at = previous_hash_expires_at.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    previous_hash_expires_at = None
+
+            should_rotate = False
+            if current_hash == refresh_token_hash:
+                should_rotate = True
+                debug_logger.info(f"Current refresh token used for session {session_id}. Proceeding with rotation.")
+            elif (
+                previous_hash == refresh_token_hash
+                and previous_hash_expires_at
+                and datetime.now(timezone.utc) <= previous_hash_expires_at
+            ):
+                should_rotate = False
+                debug_logger.warning(
+                    f"Previous refresh token used for session {session_id} within grace period. "
+                    f"Re-issuing access token without rotation to handle race condition."
+                )
+            else:
+                reason = "refresh_token_hash_mismatch"
+                details = {
+                    "client_ip": client_ip,
+                    "session_id": session_id,
+                    "failure_reason": reason,
+                    "jti": token_data.jti if token_data else "unknown",
+                }
+                debug_logger.error(f"Token refresh failed. Details: {details}")
+                await log_audit_event(event_type="token_refresh_failed", user_id=user_id, details=details)
+                await session_service_client.terminate_session(session_id)
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Invalid or expired session: {reason}")
+
+            is_valid, reason = await validate_session_security(session_data, request, user_id)
             if not is_valid:
-                session.is_active = False
+                await session_service_client.terminate_session(session_id)
                 await log_audit_event(
                     event_type="token_refresh_failed",
                     user_id=user_id,
-                    details={
-                        "client_ip": client_ip,
-                        "session_id": session_id,
-                        "reason": f"security_validation_failed_{reason}"
-                    }
+                    details={"client_ip": client_ip, "session_id": session_id, "reason": f"security_validation_failed_{reason}"},
                 )
                 raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail=f"Session security validation failed: {reason}"
+                    status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Session security validation failed: {reason}"
                 )
 
-            user = await transaction_db.get(User, user_id)
+            user = await db.get(User, user_id)
             if not user or not user.is_active:
-                session.is_active = False
+                await session_service_client.terminate_session(session_id)
                 await log_audit_event(
                     event_type="token_refresh_failed",
                     user_id=user_id,
-                    details={
-                        "client_ip": client_ip,
-                        "session_id": session_id,
-                        "reason": "user_inactive"
-                    }
+                    details={"client_ip": client_ip, "session_id": session_id, "reason": "user_inactive"},
                 )
                 raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="User account is inactive or not found"
+                    status_code=status.HTTP_400_BAD_REQUEST, detail="User account is inactive or not found"
                 )
 
             tenant = await transaction_db.get(Tenant, user.tenant_id)
             if not tenant or tenant.status != TenantStatus.ACTIVE:
+                await session_service_client.terminate_session(session_id)
                 await log_audit_event(
                     event_type="token_refresh_failed",
                     user_id=user_id,
@@ -573,128 +589,118 @@ async def refresh_access_token(
                         "client_ip": client_ip,
                         "session_id": session_id,
                         "tenant_status": tenant.status.value if tenant else "None",
-                        "reason": "inactive_tenant"
-                    }
+                        "reason": "inactive_tenant",
+                    },
                 )
                 raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Tenant account is {tenant.status.value.lower() if tenant else 'invalid'}"
+                    status_code=status.HTTP_400_BAD_REQUEST, detail=f"Tenant account is {tenant.status.value.lower() if tenant else 'invalid'}"
                 )
 
-            if token_data.jti and await is_token_blacklisted(transaction_db, token_data.jti):
-                session.is_active = False
+            if token_data.jti and await is_token_blacklisted(db, token_data.jti):
+                await session_service_client.terminate_session(session_id)
                 await log_audit_event(
                     event_type="token_refresh_failed",
                     user_id=user_id,
-                    details={
-                        "client_ip": client_ip,
-                        "session_id": session_id,
-                        "reason": "token_blacklisted"
-                    }
+                    details={"client_ip": client_ip, "session_id": session_id, "reason": "token_blacklisted"},
                 )
                 raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Refresh token has been revoked"
+                    status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token has been revoked"
                 )
 
-            session.is_active = False
-            session.logged_out_at = datetime.now(timezone.utc)
-
-            new_session_id = str(uuid4())
-            refresh_expires_at = datetime.now(timezone.utc) + timedelta(days=auth_manager.refresh_token_expire_days)
-            new_refresh_token_raw = auth_manager.create_refresh_token(
-                data={
-                    "sub": str(user.id),
-                    "user_id": str(user.id),
-                    "email": user.email,
-                    "tenant_id": str(user.tenant_id),
-                    "session_id": new_session_id,
-                    "iat": datetime.now(timezone.utc),
-                    "exp": refresh_expires_at
-                },
-                tenant_id=str(user.tenant_id),
-                roles=[user.role.value],
-                scopes=token_data.scopes or [],
-                session_id=new_session_id
-            )
-
-            new_refresh_token_hash = hashlib.sha256(new_refresh_token_raw.encode()).hexdigest()
-            new_session = UserSession(
-                user_id=user.id,
-                session_id=new_session_id,
-                refresh_token_hash=new_refresh_token_hash,
-                expires_at=refresh_expires_at,
-                client_ip=client_ip,
-                user_agent=user_agent,
-                is_active=True,
-                last_used_at=datetime.now(timezone.utc)
-            )
-            transaction_db.add(new_session)
-
             access_token_expires = timedelta(minutes=auth_manager.access_token_expire_minutes)
+            new_token_data = {
+                "sub": str(user.id),
+                "user_id": str(user.id),
+                "email": user.email,
+                "tenant_id": str(user.tenant_id),
+                "session_id": session_id,
+                "iat": datetime.now(timezone.utc),
+                "exp": datetime.now(timezone.utc) + access_token_expires,
+            }
+
             new_access_token = auth_manager.create_access_token(
-                data={
-                    "sub": str(user.id),
-                    "user_id": str(user.id),
-                    "email": user.email,
-                    "tenant_id": str(user.tenant_id),
-                    "session_id": new_session_id,
-                    "iat": datetime.now(timezone.utc).timestamp(),
-                    "exp": (datetime.now(timezone.utc) + access_token_expires).timestamp()
-                },
+                data=new_token_data,
                 expires_in=access_token_expires,
                 tenant_id=str(user.tenant_id),
                 roles=[user.role.value],
-                scopes=token_data.scopes or [],
-                session_id=new_session_id
+                scopes=[],
+                session_id=session_id,
             )
 
-            await delete_refresh_token_securely(session_id)
-            await store_refresh_token_securely(
-                new_session_id,
-                new_refresh_token_raw,
-                int(auth_manager.refresh_token_expire_days * 24 * 60 * 60)
-            )
+            if should_rotate:
+                refresh_token_expires_delta = timedelta(days=settings.refresh_token_expire_days)
+                if settings.refresh_token_expire_minutes:
+                    refresh_token_expires_delta = timedelta(minutes=settings.refresh_token_expire_minutes)
 
-            response.set_cookie(
-                key="refresh_token",
-                value=new_refresh_token_raw,
-                httponly=True,
-                secure=True,
-                samesite="lax",
-                path="/auth",
-                expires=refresh_expires_at
-            )
+                new_refresh_token_raw = auth_manager.create_refresh_token(
+                    data={"user_id": str(user.id), "session_id": session_id},
+                    expires_in=refresh_token_expires_delta,
+                    session_id=session_id,
+                    user_id=str(user.id),
+                )
+                new_refresh_token_hash = hashlib.sha256(new_refresh_token_raw.encode()).hexdigest()
+
+                session_update_data = {
+                    "previous_refresh_token_hash": current_hash,
+                    "previous_refresh_token_expires_at": (
+                        datetime.now(timezone.utc) + timedelta(seconds=settings.refresh_token_grace_period_seconds)
+                    ).isoformat(),
+                    "refresh_token_hash": new_refresh_token_hash,
+                    "last_accessed": datetime.now(timezone.utc).isoformat(),
+                    "user_agent": user_agent,
+                }
+
+                update_success = await session_service_client.update_session(session_id, session_update_data)
+
+                if not update_success:
+                    await session_service_client.terminate_session(session_id)
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Failed to update session with new refresh token",
+                    )
+
+                await store_refresh_token_securely(
+                    session_id,
+                    new_refresh_token_raw,
+                    int(refresh_token_expires_delta.total_seconds()),
+                )
+
+                response.set_cookie(
+                    key="refresh_token",
+                    value=new_refresh_token_raw,
+                    httponly=True,
+                    secure=True,
+                    samesite="lax",
+                    path="/auth",
+                    expires=datetime.now(timezone.utc) + refresh_token_expires_delta,
+                )
 
             await log_audit_event(
                 event_type="token_refresh_success",
                 user_id=user_id,
-                details={
-                    "email": user.email,
-                    "client_ip": client_ip,
-                    "session_id": new_session_id,
-                    "tenant_id": str(user_id),
-                    "tenant_status": tenant.status.value
-                }
+                details={"client_ip": client_ip, "session_id": session_id, "rotated": should_rotate},
             )
 
             return TokenResponse(
                 access_token=new_access_token,
-                refresh_token=new_refresh_token_raw,
                 token_type="bearer",
                 expires_in=int(access_token_expires.total_seconds()),
-                tenant_status=tenant.status.value
+                tenant_status=tenant.status.value,
             )
 
-        except HTTPException:
-            raise
-        except Exception as e:
-            debug_logger.error(f"Refresh error: {e}")
-            debug_logger.error(f"Traceback: {traceback.format_exc()}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Internal server error"
-            )
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        debug_logger.error(f"Unexpected error in refresh_access_token: {e}", exc_info=True)
+        await log_audit_event(
+            event_type="token_refresh_failed",
+            user_id=getattr(token_data, 'user_id', None),
+            details={"client_ip": client_ip, "reason": "unexpected_error", "error": str(e)},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred during token refresh.",
+        )
 
 @router.post("/password/change")
 async def change_password(
@@ -725,7 +731,7 @@ async def change_password(
             current_user.failed_login_attempts = 0
             current_user.locked_until = None
 
-            await invalidate_user_sessions(transaction_db, str(current_user.id))
+            await invalidate_user_sessions(user_id=str(current_user.id))
 
             await log_audit_event(
                 event_type="password_change_success",
@@ -915,17 +921,11 @@ async def logout(
                     debug_logger.error(f"Token decode error during logout: {e}")
 
             if session_id_to_revoke:
-                result = await transaction_db.execute(
-                    select(UserSession).where(
-                        UserSession.session_id == session_id_to_revoke,
-                        UserSession.user_id == current_user.id
-                    )
-                )
-                session = result.scalar_one_or_none()
-                if session:
-                    session.is_active = False
-                    session.logged_out_at = datetime.now(timezone.utc)
+                revoke_success = await session_service_client.terminate_session(session_id_to_revoke)
+                if revoke_success:
                     await delete_refresh_token_securely(session_id_to_revoke)
+                else:
+                    debug_logger.warning(f"Failed to terminate session {session_id_to_revoke} during logout.")
 
             await log_audit_event(
                 event_type="user_logout_success",

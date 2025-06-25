@@ -111,14 +111,18 @@ async def reverse_proxy(request: Request, path: str):
     async with httpx.AsyncClient() as client:
         # Reconstruct the downstream URL by prepending the service URL to the path
         # The path from the router will not include the '/api' prefix
-        if (
-            path.startswith("auth/")
-            or path.startswith("users/")
-            or path.startswith("tenant/")
-            or path.startswith("oauth/")
-        ):
+        if path.startswith("auth/") or path.startswith("oauth/"):
             downstream_url = f"{settings.AUTH_SERVICE_URL}/{path}"
+        elif path.startswith("users/"):
+            # Assuming USER_SERVICE_URL is configured for user-related paths
+            downstream_url = f"{settings.USER_SERVICE_URL}/{path}"
+        elif path.startswith("tenant/"):
+            # Assuming TENANT_SERVICE_URL is configured for tenant-related paths
+            downstream_url = f"{settings.TENANT_SERVICE_URL}/{path}"
+        elif path.startswith("sessions/"):
+            downstream_url = f"{settings.SESSION_SERVICE_URL}/{path}"
         else:
+            logger.warning(f"Unknown API path requested: {path}")
             return Response(status_code=404, content="Not Found")
 
         headers = dict(request.headers)
@@ -151,7 +155,8 @@ async def health_check(response: Response):
     Verifies its own status and checks downstream services.
     """
     downstream_services = {
-        "auth_service": f"{settings.AUTH_SERVICE_URL}/health"
+        "auth_service": f"{settings.AUTH_SERVICE_URL}/health",
+        "session_service": f"{settings.SESSION_SERVICE_URL}/health"
     }
     service_statuses = {}
     is_healthy = True

@@ -25,8 +25,7 @@ from common.audit_logger import log_audit_event
 
 from auth_service.app.models.oauth_models import OAuthClient
 from auth_service.app.models.auth_code_models import AuthCode
-from auth_service.app.models.refresh_token_models import RefreshToken
-from auth_service.app.models.user_session import UserSession
+from auth_service.app.clients.session_client import session_service_client
 from auth_service.app.dependencies import get_current_active_user, get_current_admin_user
 from auth_service.app.services.auth_service import blacklist_token
 
@@ -381,79 +380,59 @@ async def google_callback(
                     details={"provider": "google"}
                 )
             
-            # Create a user session first to get a session_id
-            session_id = str(uuid4())
-
-            # Generate JWT tokens, ensuring session_id is included
-            access_token = auth_manager.create_access_token(
-                data={
-                    "email": user.email,
-                    "is_active": user.is_active,
-                    "is_verified": user.is_verified,
-                    "tenant_id": str(user.tenant_id) if user.tenant_id else None,
-                    "session_id": session_id,  # Explicitly include session_id in payload
-                },
+            # Create session via session service to get a session_id
+            session_response = await session_service_client.create_session(
                 user_id=str(user.id),
-                session_id=session_id, # Pass as argument as well for clarity
-                # expires_in=timedelta(minutes=settings.access_token_expire_minutes)
+                client_ip=request.client.host if request else "N/A",
+                user_agent=request.headers.get("user-agent", "N/A")
+            )
+
+            if not session_response or "session_token" not in session_response:
+                logger.error(f"Failed to create session for user {user.id} during OAuth flow.")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to create user session."
+                )
+            
+            session_id = session_response["session_token"]
+
+            # Create access and refresh tokens using the new session_id
+            access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
+            access_token = auth_manager.create_access_token(
+                data={"sub": str(user.id), "session_id": session_id},
+                user_id=str(user.id),
+                session_id=session_id,
+                expires_in=access_token_expires
             )
             
             refresh_token = auth_manager.create_refresh_token(
                 data={"sub": str(user.id), "session_id": session_id},
                 user_id=str(user.id),
-                session_id=session_id, # Pass as argument
+                session_id=session_id,
                 expires_in=timedelta(days=settings.refresh_token_expire_days)
             )
-            
-            # Get or create Google OAuth client
-            from auth_service.app.models.oauth_models import OAuthClient
-            
-            # Determine a tenant-scoped client_id so each tenant has its own Google client row
-            tenant_id_str = str(user.tenant_id) if user.tenant_id else "global"
-            client_id_value = f"google-{tenant_id_str}"
 
-            stmt = select(OAuthClient).where(OAuthClient.client_id == client_id_value)
-            result = await db.execute(stmt)
-            oauth_client = result.scalar_one_or_none()
-
-            if not oauth_client:
-                logger.info(f"Creating Google OAuth client for tenant {tenant_id_str}…")
-                oauth_client = OAuthClient(
-                    client_id=client_id_value,
-                    client_secret=None,  # Google handles its own secret
-                    redirect_uris=[settings.google_redirect_uri],
-                    grant_types=["authorization_code"],
-                    scopes=["openid", "email", "profile"],
-                    tenant_id=user.tenant_id,
-                    is_confidential=False,
-                )
-                db.add(oauth_client)
-                await db.commit()
-                await db.refresh(oauth_client)
-            
-            # Store refresh token in database
+            # Update the session with the refresh token hash
             refresh_token_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
-            new_refresh_token = RefreshToken(
-                user_id=user.id,
-                token=refresh_token_hash,
-                client_id=oauth_client.id,
-                expires_at=datetime.now(timezone.utc) + timedelta(days=settings.refresh_token_expire_days)
+            expires_at = datetime.now(timezone.utc) + timedelta(days=auth_manager.refresh_token_expire_days)
+            
+            update_success = await session_service_client.update_session(
+                session_token=session_id,
+                data={
+                    "refresh_token_hash": refresh_token_hash,
+                    "expires_at": expires_at.isoformat(),
+                }
             )
-            db.add(new_refresh_token)
 
-            # Create user session entry
-            new_session = UserSession(
-                user_id=user.id,
-                session_id=session_id,
-                refresh_token_hash=refresh_token_hash,
-                expires_at=datetime.now(timezone.utc) + timedelta(days=auth_manager.refresh_token_expire_days),
-                client_ip=request.client.host if request else None,
-                user_agent=request.headers.get("user-agent") if request else None,
-                is_active=True,
-                last_used_at=datetime.now(timezone.utc)
-            )
-            db.add(new_session)
-            await db.commit()
+            if not update_success:
+                logger.error(f"Failed to update session {session_id} with refresh token for user {user.id}.")
+                await session_service_client.terminate_session(session_id)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to update user session."
+                )
+            
+            await db.commit() # Commit any user/tenant changes from earlier
             
             # Log successful login
             await log_audit_event(

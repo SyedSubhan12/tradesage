@@ -7,7 +7,7 @@ from common.audit import AuditLog  # Import AuditLog model
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from common.config import settings
 from typing import AsyncGenerator
-from contextlib import contextmanager
+from contextlib import contextmanager, asynccontextmanager
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +129,32 @@ class DatabaseManager:
             self.session.rollback()
             logger.error(f"Transaction rolled back: {e}", exc_info=True)
             raise
+
+
+
+from fastapi import HTTPException
+
+@asynccontextmanager
+async def atomic_session_operation(session: AsyncSession):
+    """Provide an atomic (commit/rollback) transaction scope for an AsyncSession.
+
+    Example:
+        async with atomic_session_operation(db_session) as transaction_db:
+            # use transaction_db
+            ...
+    """
+    try:
+        yield session
+        await session.commit()
+        logger.debug("Transaction committed successfully")
+    except HTTPException:
+        await session.rollback()
+        logger.warning("Transaction rolled back due to HTTPException.")
+        raise
+    except Exception as e:
+        await session.rollback()
+        logger.error(f"Transaction rolled back due to unexpected error: {e}", exc_info=True)
+        raise
 
 # Factory function to get DatabaseManager instance
 

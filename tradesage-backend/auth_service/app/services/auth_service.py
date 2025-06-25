@@ -10,7 +10,7 @@ from fastapi import HTTPException, status, Request
 from common.models import Tenant, TenantStatus, BaseUser
 from common.redis_client import redis_manager
 from auth_service.app.models.token_blacklist import TokenBlacklist
-from auth_service.app.models.user_session import UserSession
+from typing import Dict
 
 logger = logging.getLogger("tradesage.auth")
 
@@ -98,13 +98,7 @@ async def cleanup_expired_tokens(db: AsyncSession):
         logger.info(f"Deleted {deleted_count} expired password reset tokens.")
         yield deleted_count
 
-        # Clean expired user sessions
-        result = await db.execute(
-            delete(UserSession).where(UserSession.expires_at < current_time)
-        )
-        deleted_count = result.rowcount
-        logger.info(f"Deleted {deleted_count} expired user sessions.")
-        yield deleted_count
+
 
         # Clean expired blacklisted tokens
         result = await db.execute(
@@ -119,7 +113,7 @@ async def cleanup_expired_tokens(db: AsyncSession):
         # Re-raise to ensure the transaction context manager handles the rollback
         raise
 
-async def validate_session_security(session: UserSession, request: Request, user_id: UUIDType) -> (bool, str):
+async def validate_session_security(session: Dict[str, any], request: Request, user_id: UUIDType) -> (bool, str):
     """
     Performs security validation on the user session.
     Checks for IP address and user agent consistency.
@@ -127,13 +121,15 @@ async def validate_session_security(session: UserSession, request: Request, user
     client_ip = request.client.host
     user_agent = request.headers.get("user-agent", "")
 
-    if session.client_ip and session.client_ip != client_ip:
-        logger.warning(f"Session security violation for user {user_id}: IP mismatch. Session IP: {session.client_ip}, Current IP: {client_ip}")
+    session_ip = session.get("client_ip")
+    if session_ip and session_ip != client_ip:
+        logger.warning(f"Session security violation for user {user_id}: IP mismatch. Session IP: {session_ip}, Current IP: {client_ip}")
         return False, "ip_mismatch"
 
     # Temporarily disable user agent validation for debugging
-    # if session.user_agent and session.user_agent != user_agent:
-    #     logger.warning(f"Session security violation for user {user_id}: User-Agent mismatch. Session UA: {session.user_agent}, Current UA: {user_agent}")
+    # session_ua = session.get("user_agent")
+    # if session_ua and session_ua != user_agent:
+    #     logger.warning(f"Session security violation for user {user_id}: User-Agent mismatch. Session UA: {session_ua}, Current UA: {user_agent}")
     #     return False, "user_agent_mismatch"
 
     return True, "valid"

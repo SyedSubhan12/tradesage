@@ -4,7 +4,8 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.main import app
-from app.models import BaseUser, UserSession
+from app.models import BaseUser
+from common.models.user_session import UserSession
 from common.database import db_manager
 from common.auth import auth_manager
 

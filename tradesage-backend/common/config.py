@@ -26,8 +26,15 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 15  # 15 minutes
     refresh_token_expire_days: int = 30  # 30 days
     refresh_token_expire_minutes: Optional[int] = None # For testing, allows setting expiration in minutes
+    refresh_token_grace_period_seconds: int = 60 # Grace period for old refresh token to be valid
     jwt_issuer: str = "tradesage-auth-service"
     bcrypt_rounds: int = 12
+
+    # Session Service
+    session_encryption_key: str
+    session_token_expire_minutes: int = 60 * 24 * 7  # 7 days
+    session_cache_prefix: str = "session:"
+    auto_save_interval: int = 5  # seconds
 
     # Redis
     redis_url: Optional[str] = os.environ.get("REDIS_URL")
@@ -39,6 +46,8 @@ class Settings(BaseSettings):
     auth_service_url: Optional[str] = os.environ.get("AUTH_SERVICE_URL")
     user_service_url: Optional[str] = os.environ.get("USER_SERVICE_URL")
     tenant_service_url: Optional[str] = os.environ.get("TENANT_SERVICE_URL")
+    # Session Service URL (fallback to internal Docker service if env not provided)
+    session_service_url: str = os.environ.get("SESSION_SERVICE_URL", "http://127.0.0.1:8082")
 
     # CORS settings
     cors_origins: List[str] = [

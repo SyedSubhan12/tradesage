@@ -14,11 +14,10 @@ from enum import Enum
 import uuid
 from sqlalchemy.orm import relationship
 from common.database import Base
+# Ensure UserSession mapper is registered before relationship string resolution
+import auth_service.app.models.user_session  # noqa: F401
+import auth_service.app.models.token_blacklist  # noqa: F401
 
-# Removed imports to avoid circular import
-# from auth_service.app.models.password_reset_token_models import PasswordResetToken
-# from auth_service.app.models.user_session import UserSession
-# from auth_service.app.models.token_blacklist import TokenBlacklist
 
 
 class UserRole(str, Enum):
@@ -143,7 +142,7 @@ class User(BaseUser):
 
     # User sessions relationship
     user_sessions = relationship(
-        "auth_service.app.models.user_session.UserSession",
+        "UserSession",
         back_populates="user",
         cascade="all, delete-orphan"
     )
