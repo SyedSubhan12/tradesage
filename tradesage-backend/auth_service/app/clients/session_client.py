@@ -26,9 +26,10 @@ class SessionServiceClient:
                 headers=headers
             )
             response.raise_for_status()
+            logger.info(f"Successfully created session for user {user_id}")
             return response.json()
         except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error creating session for user {user_id}: {e.response.text}", exc_info=True)
+            logger.error(f"HTTP error creating session for user {user_id}: {e.response.status_code}, {e.response.text}", exc_info=True)
         except httpx.RequestError as e:
             logger.error(f"Request error creating session for user {user_id}: {e}", exc_info=True)
         return None
@@ -37,12 +38,13 @@ class SessionServiceClient:
         try:
             response = await self.client.get(f"/api/v1/sessions/{session_id}")
             response.raise_for_status()
+            logger.info(f"Successfully retrieved session {session_id} from session service")
             return response.json()
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
-                logger.warning(f"Session {session_id} not found.")
+                logger.warning(f"Session {session_id} not found in session service, status code: {e.response.status_code}")
             else:
-                logger.error(f"HTTP error getting session {session_id}: {e.response.text}", exc_info=True)
+                logger.error(f"HTTP error getting session {session_id}: {e.response.status_code}, {e.response.text}", exc_info=True)
         except httpx.RequestError as e:
             logger.error(f"Request error getting session {session_id}: {e}", exc_info=True)
         return None
@@ -54,9 +56,10 @@ class SessionServiceClient:
                 json={"session_data": data}
             )
             response.raise_for_status()
+            logger.info(f"Successfully updated session {session_token}")
             return response.status_code == 204
         except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error updating session {session_token}: {e.response.text}", exc_info=True)
+            logger.error(f"HTTP error updating session {session_token}: {e.response.status_code}, {e.response.text}", exc_info=True)
         except httpx.RequestError as e:
             logger.error(f"Request error updating session {session_token}: {e}", exc_info=True)
         return False
@@ -65,9 +68,10 @@ class SessionServiceClient:
         try:
             response = await self.client.delete(f"/api/v1/sessions/{session_id}")
             response.raise_for_status()
+            logger.info(f"Successfully terminated session {session_id}")
             return response.status_code == 204
         except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error terminating session {session_id}: {e.response.text}", exc_info=True)
+            logger.error(f"HTTP error terminating session {session_id}: {e.response.status_code}, {e.response.text}", exc_info=True)
         except httpx.RequestError as e:
             logger.error(f"Request error terminating session {session_id}: {e}", exc_info=True)
         return False
@@ -76,9 +80,10 @@ class SessionServiceClient:
         try:
             response = await self.client.get(f"/api/v1/sessions/user/{user_id}")
             response.raise_for_status()
+            logger.info(f"Successfully retrieved sessions for user {user_id}")
             return response.json()
         except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error getting sessions for user {user_id}: {e.response.text}", exc_info=True)
+            logger.error(f"HTTP error getting sessions for user {user_id}: {e.response.status_code}, {e.response.text}", exc_info=True)
         except httpx.RequestError as e:
             logger.error(f"Request error getting sessions for user {user_id}: {e}", exc_info=True)
         return None

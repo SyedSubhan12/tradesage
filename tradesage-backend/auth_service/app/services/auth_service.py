@@ -65,52 +65,60 @@ async def blacklist_token(db: AsyncSession, token: str, user_id: UUIDType, revok
         await db.rollback()
         raise # Re-raise the exception
 
-async def is_token_blacklisted(db: AsyncSession, token: str) -> bool:
-    """Check if a token is blacklisted"""
-    token_hash = hashlib.sha256(token.encode()).hexdigest()
+async def is_token_blacklisted(token: str, db: AsyncSession) -> bool:
+    """
+    Check if a token has been blacklisted.
+    Returns True if blacklisted, False otherwise.
+    """
     try:
+        if not token:
+            logger.warning("Empty token provided to blacklist check")
+            return False
+            
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
         result = await db.execute(
-            select(TokenBlacklist).where(
-                TokenBlacklist.token_hash == token_hash
-            )
+            select(TokenBlacklist).where(TokenBlacklist.token_hash == token_hash)
         )
-        return result.scalars().first() is not None
+        blacklisted_token = result.scalar_one_or_none()
+        
+        if blacklisted_token:
+            logger.info(f"Blacklisted token detected: {blacklisted_token.reason}")
+            return True
+        
+        return False
     except Exception as e:
         logger.error(f"Error checking token blacklist: {e}")
         return False
 
 async def cleanup_expired_tokens(db: AsyncSession):
-    """
+    '''
     Clean up expired password reset tokens, sessions, and blacklisted tokens.
 
     This is an async generator that yields the number of deleted items for each category.
-    """
+    '''
     from auth_service.app.models.password_reset_token_models import PasswordResetToken
-
+    from auth_service.app.models.token_blacklist_models import TokenBlacklist  # Ensure model is imported if needed
     try:
+        logger.info("Starting cleanup of expired tokens...")
         current_time = datetime.now(timezone.utc)
-
-        # Clean expired password reset tokens
+        logger.info("Cleaning expired password reset tokens...")
         result = await db.execute(
             delete(PasswordResetToken).where(PasswordResetToken.expires_at < current_time)
         )
-        deleted_count = result.rowcount
-        logger.info(f"Deleted {deleted_count} expired password reset tokens.")
-        yield deleted_count
+        deleted_count_prt = result.rowcount
+        logger.info(f"Deleted {deleted_count_prt} expired password reset tokens.")
+        yield deleted_count_prt  # Yielding password reset token delete count
 
-
-
-        # Clean expired blacklisted tokens
+        logger.info("Cleaning expired blacklisted tokens...")
         result = await db.execute(
             delete(TokenBlacklist).where(TokenBlacklist.expires_at < current_time)
         )
-        deleted_count = result.rowcount
-        logger.info(f"Deleted {deleted_count} expired blacklisted tokens.")
-        yield deleted_count
+        deleted_count_tb = result.rowcount
+        logger.info(f"Deleted {deleted_count_tb} expired blacklisted tokens.")
+        yield deleted_count_tb  # Yielding blacklisted token delete count
 
     except Exception as e:
         logger.error(f"Critical error during token cleanup: {e}", exc_info=True)
-        # Re-raise to ensure the transaction context manager handles the rollback
         raise
 
 async def validate_session_security(session: Dict[str, any], request: Request, user_id: UUIDType) -> (bool, str):

@@ -214,3 +214,29 @@ export const api = {
     await axiosInstance.post('/auth/password/change', data);
   },
 };
+
+// Add proactive token refresh logic
+setInterval(async () => {
+  const accessToken = localStorage.getItem('access_token');
+  if (accessToken) {
+    const tokenData = JSON.parse(atob(accessToken.split('.')[1])); // Decode JWT payload
+    const exp = tokenData.exp * 1000; // JWT exp is in seconds, convert to ms
+    const now = Date.now();
+    const expiresAt = new Date(exp).toISOString(); // Ensure UTC handling
+    if ((exp - now) < 300000) { // Less than 5 minutes remaining
+      try {
+        const newTokenResponse = await refreshAccessToken();
+        localStorage.setItem('access_token', newTokenResponse.access_token);
+        if (newTokenResponse.refresh_token) {
+          localStorage.setItem('refresh_token', newTokenResponse.refresh_token);
+        }
+        console.log('Proactive token refresh successful.');
+      } catch (error) {
+        console.error('Proactive refresh failed. Logging out.', error);
+        localStorage.removeItem('access_token');
+        localStorage.removeItem('refresh_token');
+        window.location.href = '/auth/login';
+      }
+    }
+  }
+}, 300000); // Check every 5 minutes (300,000 ms)

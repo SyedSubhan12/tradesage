@@ -8,6 +8,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from common.config import settings
 from typing import AsyncGenerator
 from contextlib import contextmanager, asynccontextmanager
+from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ class DatabaseManager:
         logger.info("Getting database session")
         async with self.async_session() as session:
             try:
+                logger.debug(f"Database connection pool usage: {self.engine.pool.size} connections in use, {self.engine.pool.checkedin} connections available")
                 yield session
 
                 @retry(
@@ -64,8 +66,11 @@ class DatabaseManager:
 
                 await do_commit()
 
+            except sqlalchemy.exc.OperationalError as e:
+                logger.error(f"Database operational error: {e}")
+                raise HTTPException(status_code=500, detail="Database connection error")
             except Exception as e:
-                logger.error(f"Failed to commit transaction: {e}")
+                logger.error(f"Failed to commit transaction: {e}", exc_info=True)
                 await session.rollback()
                 raise
 
@@ -131,8 +136,6 @@ class DatabaseManager:
             raise
 
 
-
-from fastapi import HTTPException
 
 @asynccontextmanager
 async def atomic_session_operation(session: AsyncSession):

@@ -68,11 +68,11 @@ class TokenData(BaseModel):
     scopes: List[str] = []
     roles: List[str] = []
     session_id: Optional[str] = None
-    expires_in: Optional[datetime] = None
+    expires_in: Optional[datetime] = None  # Note: 'expires_in' might be a misnomer; adding 'exp' for JWT expiration
+    exp: Optional[int] = None  # Add exp field for JWT expiration timestamp
     jti: Optional[str] = None
     token_type: Optional[str] = None
     ver: Optional[str] = None
-
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -264,10 +264,7 @@ class AuthManager:
         elif "user_id" not in to_encode or not to_encode["user_id"]:
             raise ValueError("user_id must be set in token payload")
 
-        # --- TEMPORARY CHANGE FOR TESTING ---
-        # Force a short expiration time to test refresh flow
-        expire = datetime.now(timezone.utc) + timedelta(seconds=15)
-        # --- END TEMPORARY CHANGE ---
+        expire = datetime.now(timezone.utc) + (expires_in if expires_in else timedelta(minutes=15))  # Restore or set default expiration, assuming 15 minutes as a common default if not specified
 
         # Get current time once
         now = datetime.now(timezone.utc)

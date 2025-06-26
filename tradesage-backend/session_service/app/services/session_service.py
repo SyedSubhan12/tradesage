@@ -28,6 +28,9 @@ class SessionService:
         self.redis = redis_client
         self.fernet = Fernet(encryption_key.encode())
         self.config = config
+        # Validate config for expiration consistency
+        if self.config.session_token_expire_minutes * 60 != self.config.redis_session_ttl_seconds:
+            raise ValueError(f"Config mismatch: session_token_expire_minutes ({self.config.session_token_expire_minutes}) must match redis_session_ttl_seconds ({self.config.redis_session_ttl_seconds}) in seconds.")
         # Initialize circuit breaker for DB loads
         threshold = getattr(config, "circuit_breaker_threshold", 5)
         self.circuit_breaker = CircuitBreaker(threshold=threshold, timeout=30)
@@ -69,16 +72,34 @@ class SessionService:
         return SessionData(**filtered_data)
 
     async def _cache_session(self, session_id: str, session_data: SessionData):
+        """Write session to Redis cache and emit detailed diagnostics."""
         encrypted_data = self._serialize_session_data(session_data)
+        # Use set with TTL derived from config (minutes -> seconds)
         await self.redis.set(
             f"{self.config.session_cache_prefix}{session_id}",
             encrypted_data,
             ex=int(self.config.session_token_expire_minutes * 60),
         )
+        # Diagnostics – TTL as recorded by Redis after the write
+        ttl_seconds: int = await self.redis.ttl(f"{self.config.session_cache_prefix}{session_id}")
+        self.logger.debug(
+            "[CACHE] Session %s cached to Redis key=%s ttl=%s data_len=%s",
+            session_id,
+            f"{self.config.session_cache_prefix}{session_id}",
+            ttl_seconds,
+            len(encrypted_data),
+        )
 
     async def _get_cached_session(self, session_id: str) -> Optional[SessionData]:
         cached_data = await self.redis.get(f"{self.config.session_cache_prefix}{session_id}")
         if cached_data:
+            ttl = await self.redis.ttl(f"{self.config.session_cache_prefix}{session_id}")
+            self.logger.debug(
+                "[CACHE] Retrieved session %s from Redis (ttl=%s, data_len=%s)",
+                session_id,
+                ttl,
+                len(cached_data),
+            )
             return self._deserialize_session_data(cached_data)
         return None
 
@@ -116,6 +137,7 @@ class SessionService:
             
             try:
                 await db_session.commit()
+                self.logger.debug(f'Session {session_data.session_id} saved successfully to database.')
             except Exception as commit_err:
                 await db_session.rollback()
                 self.logger.error(
@@ -126,16 +148,33 @@ class SessionService:
 
     @CircuitBreaker()
     async def _load_from_database(self, session_id: str) -> Optional[SessionData]:
-        async with self.async_session_factory() as db_session:
-            user_session = await db_session.get(UserSession, session_id)
-            if user_session and user_session.state == SessionState.ACTIVE.value:
-                session_data = self._deserialize_session_data(user_session.encrypted_data)
-                if session_data:
-                    # CRITICAL: Overwrite with values from dedicated columns to ensure freshness
-                    session_data.refresh_token_hash = user_session.refresh_token_hash
-                    session_data.previous_refresh_token_hash = user_session.previous_refresh_token_hash
-                    session_data.previous_refresh_token_expires_at = user_session.previous_refresh_token_expires_at
-                return session_data
+        """Loads session data from the database with a retry mechanism to handle replication lag."""
+        for attempt in range(3):  # Retry up to 3 times
+            async with self.async_session_factory() as db_session:
+                user_session = await db_session.get(UserSession, session_id)
+                if user_session and user_session.state == SessionState.ACTIVE.value:
+                    session_data = self._deserialize_session_data(user_session.encrypted_data)
+                    if session_data:
+                        # CRITICAL: Overwrite with values from dedicated columns to ensure freshness
+                        session_data.refresh_token_hash = user_session.refresh_token_hash
+                        session_data.previous_refresh_token_hash = user_session.previous_refresh_token_hash
+                        session_data.previous_refresh_token_expires_at = user_session.previous_refresh_token_expires_at
+                    # Emit detailed diagnostics before returning
+                    self.logger.debug(
+                        "[DB] Loaded session %s (state=%s, expires_at=%s, ttl_db=%s)",
+                        session_id,
+                        user_session.state,
+                        user_session.expires_at,
+                        (user_session.expires_at - datetime.utcnow()).total_seconds() if user_session.expires_at else None,
+                    )
+                    return session_data
+
+            # If session not found, wait briefly and retry to handle race conditions
+            if attempt < 2:  # Don't sleep on the last attempt
+                self.logger.warning(f"Session {session_id} not found on attempt {attempt + 1}. Retrying...")
+                await asyncio.sleep(0.05 * (attempt + 1))  # Brief, increasing delay
+
+        self.logger.error(f"Failed to load session {session_id} from database after multiple attempts.")
         return None
 
     def _decrypt_data(self, encrypted_data: bytes) -> Dict[str, Any]:
@@ -149,6 +188,7 @@ class SessionService:
         user_agent: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create new session with instant persistence"""
+        self.logger.info(f"Creating new session for user {user_id} at {datetime.utcnow()}")
         session_id = str(uuid.uuid4())
         session_token = self._generate_session_token()
         
@@ -178,7 +218,7 @@ class SessionService:
             # Start auto-save task
             self._start_auto_save(session_id)
             
-            self.logger.info(f"Created session {session_id} for user {user_id}")
+            self.logger.info(f"Session {session_id} created successfully for user {user_id} at {datetime.utcnow()}")
             return {
                 "session_token": session_token,
                 "user_id": user_id,
@@ -187,34 +227,34 @@ class SessionService:
             }
             
         except Exception as e:
-            self.logger.error(f"Failed to create session: {e}")
+            self.logger.error(f"Failed to create session {session_id} for user {user_id}: {e}", exc_info=True)
             raise
     
     async def get_session(self, session_id: str) -> Optional[SessionData]:
-        """Retrieves a session, prioritizing data integrity by loading from the database first."""
+        self.logger.info(f"Retrieving session {session_id} at {datetime.utcnow()}")
         try:
-            # ARCHITECTURAL FIX: The database is the single source of truth.
-            # The previous cache-first approach returned incomplete data (missing hashes),
-            # causing persistent refresh failures. We now always load from the DB.
-            self.logger.debug(f"Loading session {session_id} from database to ensure data integrity.")
-            session_data = await self._load_from_database(session_id)
-
-            if session_data:
-                # After a successful DB load, update the cache with the complete, correct data.
-                await self._cache_session(session_id, session_data)
-                return session_data
+            # Check cache first for performance
+            cached_data = await self._get_cached_session(session_id)
+            if cached_data:
+                self.logger.debug(f"Session {session_id} retrieved from cache")
+                return cached_data
             
-            # If the session is not in the database, it's invalid.
-            self.logger.warning(f"Session {session_id} not found in database.")
-            return None
-
+            # If not in cache, load from database
+            session_data = await self._load_from_database(session_id)
+            if session_data:
+                # Cache it for future use
+                await self._cache_session(session_id, session_data)
+                self.logger.info(f"Session {session_id} loaded from database and cached")
+                return session_data
+            else:
+                self.logger.warning(f"Session {session_id} not found in database")
+                return None
         except Exception as e:
-            # The circuit breaker in _load_from_database will handle DB connection errors.
-            self.logger.error(f"An unexpected error occurred while getting session {session_id}: {e}", exc_info=True)
-            return None
+            self.logger.error(f"Failed to get session {session_id}: {e}", exc_info=True)
+            raise
     
     async def update_session(self, session_id: str, updates: Dict[str, Any]) -> bool:
-        """Update session data with atomic operations, writing to DB before cache."""
+        self.logger.info(f"Updating session {session_id} at {datetime.utcnow()}")
         try:
             async with self.async_session_factory() as db_session:
                 # Lock the row for update to prevent race conditions
@@ -256,11 +296,12 @@ class SessionService:
                 user_session.previous_refresh_token_expires_at = session_data.previous_refresh_token_expires_at
 
                 await db_session.commit()
+                self.logger.debug(f'Session {session_id} saved successfully to database. Version: {session_data.version}')
 
                 # Update cache only after successful DB commit
                 await self._cache_session(session_id, session_data)
 
-                self.logger.info(f"Session {session_id} updated successfully in DB and cache")
+                self.logger.info(f"Session {session_id} updated successfully in DB and cache for user {session_data.user_id}")
                 return True
 
         except Exception as e:
@@ -322,9 +363,11 @@ class SessionService:
     
     async def terminate_session(self, session_id: str) -> bool:
         """Terminate session with cleanup"""
+        self.logger.info(f"Terminating session {session_id} at {datetime.utcnow()}")
         try:
             session_data = await self.get_session(session_id)
             if not session_data:
+                self.logger.warning(f"Session {session_id} not found for termination")
                 return False
             
             # Cancel auto-save
@@ -364,11 +407,11 @@ class SessionService:
             # Clean up cache
             await self._invalidate_cache(session_id, session_data.user_id)
             
-            self.logger.info(f"Session {session_id} terminated successfully")
+            self.logger.info(f"Session {session_id} terminated successfully for user {session_data.user_id} at {datetime.utcnow()}")
             return True
             
         except Exception as e:
-            self.logger.error(f"Failed to terminate session {session_id}: {e}")
+            self.logger.error(f"Failed to terminate session {session_id}: {e}", exc_info=True)
             return False
     
     async def delete_session(self, session_token: str) -> bool:

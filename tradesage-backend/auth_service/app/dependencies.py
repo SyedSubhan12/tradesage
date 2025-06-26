@@ -4,12 +4,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from jose import JWTError
 import sys
 import os
+import time
 
 # Add root directory to path for common module imports
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from common.database import db_manager
-from common.auth import auth_manager, TokenExpiredError, TokenExpiredError
+from common.auth import auth_manager, TokenExpiredError
 from common.models import BaseUser
 from common.utils import get_user_by_id
 
@@ -32,6 +33,15 @@ async def get_current_user_from_access_token(
         token_data = auth_manager.decode_token(token, is_refresh=False)
         if not token_data or not token_data.user_id:
             raise credentials_exception
+
+        # Check for impending expiration
+        exp_time = token_data.exp
+        if exp_time and (exp_time - time.time()) < 300:  # 5 minutes in seconds
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Access token is about to expire. Please refresh your token.",
+                headers={"WWW-Authenticate": "Bearer"}
+            )
 
         user = await get_user_by_id(db, token_data.user_id)
         if not user:

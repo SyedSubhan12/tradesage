@@ -8,7 +8,7 @@ class Settings(BaseSettings):
 
     # API Gateway
 
-    AUTH_SERVICE_URL: str = "http://auth-service:8000"
+    AUTH_SERVICE_URL: str = "http://127.0.0.1:8000"
     CORS_ALLOWED_ORIGINS: str = "*"
     # A comma-separated list of paths that should be publicly accessible through the gateway
     API_GATEWAY_PUBLIC_PATHS: str = "/api/auth/*,/api/users/register,/api/tenant/status,/docs,/openapi.json"
@@ -32,7 +32,8 @@ class Settings(BaseSettings):
 
     # Session Service
     session_encryption_key: str
-    session_token_expire_minutes: int = 60 * 24 * 7  # 7 days
+    session_token_expire_minutes: int = 60 * 24 * 30  # 30 days to match refresh token expiration
+    redis_session_ttl_seconds: int = 60 * 60 * 24 * 30  # 30 days in seconds
     session_cache_prefix: str = "session:"
     auto_save_interval: int = 5  # seconds
 

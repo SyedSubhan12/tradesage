@@ -2,6 +2,8 @@ import pytest
 import asyncio
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
+from datetime import datetime, timedelta
+import uuid
 
 from app.main import app
 from app.models import BaseUser
@@ -142,3 +144,43 @@ async def test_concurrent_token_refresh_race_condition(test_client: AsyncClient,
     token_data = auth_manager.decode_token(login_response.json()["access_token"])
     original_session = await db_session.get(UserSession, token_data.session_id)
     assert not original_session.is_active, "The original session should be marked inactive after rotation."
+
+@pytest.mark.asyncio
+async def test_token_expiration_failure(test_client: AsyncClient, test_user: BaseUser):
+    # Simulate token expiration by setting a short expiration and waiting
+    short_expire_access_token = await auth_manager.create_access_token(data={"sub": test_user.id}, expires_delta=timedelta(seconds=1))
+    await asyncio.sleep(2)  # Wait for token to expire
+    response = await test_client.get("/auth/verify-token", headers={"Authorization": f"Bearer {short_expire_access_token}"})
+    assert response.status_code == 401, "Expected 401 for expired token"
+    assert "Token expired" in response.json().get("detail", "")
+
+@pytest.mark.asyncio
+async def test_session_not_found_failure(test_client: AsyncClient, test_user: BaseUser, db_session: AsyncSession):
+    # Create and delete a session to simulate not found error
+    session = UserSession(session_id=str(uuid.uuid4()), user_id=test_user.id, is_active=False)
+    db_session.add(session)
+    await db_session.commit()
+    refresh_token = await auth_manager.create_refresh_token(data={"sub": test_user.id, "session_id": session.session_id})
+    cookies = {"refresh_token": refresh_token}
+    response = await test_client.post("/auth/refresh", cookies=cookies)
+    assert response.status_code == 401, "Expected 401 for session not found"
+    assert "Session not found" in response.json().get("detail", "")
+
+@pytest.mark.asyncio
+async def test_database_auth_failure(test_client: AsyncClient, db_session: AsyncSession):
+    # Simulate database authentication failure by attempting invalid login
+    response = await test_client.post("/auth/login", data={"username": "invalid_user", "password": "wrong_password"})
+    assert response.status_code == 401, "Expected 401 for authentication failure"
+    assert "Invalid credentials" in response.json().get("detail", "")
+
+@pytest.mark.asyncio
+async def test_periodic_cleanup_error_simulation(test_client: AsyncClient, test_user: BaseUser, db_session: AsyncSession):
+    # Simulate cleanup error by creating an expired session and checking refresh failure
+    expired_session = UserSession(session_id=str(uuid.uuid4()), user_id=test_user.id, expires_at=datetime.utcnow() - timedelta(days=1))
+    db_session.add(expired_session)
+    await db_session.commit()
+    refresh_token = await auth_manager.create_refresh_token(data={"sub": test_user.id, "session_id": expired_session.session_id})
+    cookies = {"refresh_token": refresh_token}
+    response = await test_client.post("/auth/refresh", cookies=cookies)
+    assert response.status_code == 401, "Expected 401 for expired session cleanup"
+    assert "Session expired" in response.json().get("detail", "")

@@ -382,6 +382,7 @@ async def login_for_access_token(
             path="/auth",
             expires=refresh_expires_at
         )
+        debug_logger.debug(f"Refresh token cookie set for user {user.id} with value length: {len(refresh_token_raw)} and expiry: {refresh_expires_at}")
 
         return TokenResponse(
             access_token=access_token,
@@ -400,307 +401,7 @@ async def login_for_access_token(
             detail="An unexpected error occurred during login."
         )
 
-@router.post("/refresh", response_model=TokenResponse)
-@rate_limiter.limit(get_rate_limit("auth", "refresh"))
-async def refresh_access_token(
-    request: Request,
-    response: Response,
-    db: AsyncSession = Depends(db_manager.get_session)
-):
-    client_ip = request.client.host
-    user_agent = request.headers.get("user-agent", "")
-    debug_logger.info(f"Token refresh attempt from IP: {client_ip}")
-
-    token_data = None
-    try:
-        async with atomic_session_operation(db) as transaction_db:
-            refresh_token_raw = request.cookies.get("refresh_token")
-            if not refresh_token_raw:
-                auth_header = request.headers.get("Authorization")
-                if auth_header and auth_header.startswith("Bearer "):
-                    refresh_token_raw = auth_header.split(" ")[1]
-                else:
-                    await log_audit_event(
-                        event_type="token_refresh_failed",
-                        user_id=None,
-                        details={"client_ip": client_ip, "reason": "no_refresh_token"},
-                    )
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="Refresh token required",
-                        headers={"WWW-Authenticate": "Bearer"},
-                    )
-
-            try:
-                token_data = auth_manager.decode_token(refresh_token_raw, is_refresh=True)
-                if not token_data.user_id or not token_data.session_id:
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token payload"
-                    )
-            except TokenExpiredError:
-                await log_audit_event(
-                    event_type="token_refresh_failed",
-                    user_id=getattr(token_data, 'user_id', None),
-                    details={"client_ip": client_ip, "reason": "refresh_token_expired"},
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token has expired"
-                )
-            except Exception as e:
-                await log_audit_event(
-                    event_type="token_refresh_failed",
-                    user_id=None,
-                    details={"client_ip": client_ip, "reason": "invalid_refresh_token", "error": str(e)},
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token"
-                )
-
-            user_id = token_data.user_id
-            session_id = token_data.session_id
-
-            session_data = await session_service_client.get_session(session_id)
-
-            if not session_data:
-                reason = "session_not_found"
-                details = {"client_ip": client_ip, "session_id": session_id, "failure_reason": reason}
-                debug_logger.error(f"Token refresh failed. Details: {details}")
-                await log_audit_event(event_type="token_refresh_failed", user_id=user_id, details=details)
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Invalid or expired session: {reason}"
-                )
-
-            if not session_data.get("is_active"):
-                reason = "session_is_inactive"
-                details = {"client_ip": client_ip, "session_id": session_id, "failure_reason": reason}
-                debug_logger.error(f"Token refresh failed. Details: {details}")
-                await log_audit_event(event_type="token_refresh_failed", user_id=user_id, details=details)
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Invalid or expired session: {reason}"
-                )
-
-            try:
-                expires_raw = session_data.get("expires_at")
-                if isinstance(expires_raw, datetime):
-                    expires_at = expires_raw if expires_raw.tzinfo else expires_raw.replace(tzinfo=timezone.utc)
-                elif isinstance(expires_raw, str):
-                    expires_str = expires_raw.replace("Z", "+00:00")
-                    expires_at = datetime.fromisoformat(expires_str)
-                    if expires_at.tzinfo is None:
-                        expires_at = expires_at.replace(tzinfo=timezone.utc)
-                else:
-                    raise ValueError("Invalid expires_at value")
-                if expires_at <= datetime.now(timezone.utc):
-                    raise ValueError("Session expired")
-            except (ValueError, TypeError):
-                reason = "session_has_expired"
-                details = {
-                    "client_ip": client_ip,
-                    "session_id": session_id,
-                    "failure_reason": reason,
-                    "expires_at": session_data.get("expires_at"),
-                }
-                debug_logger.error(f"Token refresh failed. Details: {details}")
-                await log_audit_event(event_type="token_refresh_failed", user_id=user_id, details=details)
-                await session_service_client.terminate_session(session_id)
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Invalid or expired session: {reason}"
-                )
-
-            refresh_token_hash = hashlib.sha256(refresh_token_raw.encode()).hexdigest()
-            current_hash = session_data.get("refresh_token_hash")
-            previous_hash = session_data.get("previous_refresh_token_hash")
-
-            previous_expires_raw = session_data.get("previous_refresh_token_expires_at")
-            previous_hash_expires_at = None
-            if isinstance(previous_expires_raw, datetime):
-                previous_hash_expires_at = (
-                    previous_expires_raw
-                    if previous_expires_raw.tzinfo
-                    else previous_expires_raw.replace(tzinfo=timezone.utc)
-                )
-            elif isinstance(previous_expires_raw, str):
-                try:
-                    expires_str = previous_expires_raw.replace("Z", "+00:00")
-                    previous_hash_expires_at = datetime.fromisoformat(expires_str)
-                    if previous_hash_expires_at.tzinfo is None:
-                        previous_hash_expires_at = previous_hash_expires_at.replace(tzinfo=timezone.utc)
-                except ValueError:
-                    previous_hash_expires_at = None
-
-            should_rotate = False
-            if current_hash == refresh_token_hash:
-                should_rotate = True
-                debug_logger.info(f"Current refresh token used for session {session_id}. Proceeding with rotation.")
-            elif (
-                previous_hash == refresh_token_hash
-                and previous_hash_expires_at
-                and datetime.now(timezone.utc) <= previous_hash_expires_at
-            ):
-                should_rotate = False
-                debug_logger.warning(
-                    f"Previous refresh token used for session {session_id} within grace period. "
-                    f"Re-issuing access token without rotation to handle race condition."
-                )
-            else:
-                reason = "refresh_token_hash_mismatch"
-                details = {
-                    "client_ip": client_ip,
-                    "session_id": session_id,
-                    "failure_reason": reason,
-                    "jti": token_data.jti if token_data else "unknown",
-                }
-                debug_logger.error(f"Token refresh failed. Details: {details}")
-                await log_audit_event(event_type="token_refresh_failed", user_id=user_id, details=details)
-                await session_service_client.terminate_session(session_id)
-                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Invalid or expired session: {reason}")
-
-            is_valid, reason = await validate_session_security(session_data, request, user_id)
-            if not is_valid:
-                await session_service_client.terminate_session(session_id)
-                await log_audit_event(
-                    event_type="token_refresh_failed",
-                    user_id=user_id,
-                    details={"client_ip": client_ip, "session_id": session_id, "reason": f"security_validation_failed_{reason}"},
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Session security validation failed: {reason}"
-                )
-
-            user = await db.get(User, user_id)
-            if not user or not user.is_active:
-                await session_service_client.terminate_session(session_id)
-                await log_audit_event(
-                    event_type="token_refresh_failed",
-                    user_id=user_id,
-                    details={"client_ip": client_ip, "session_id": session_id, "reason": "user_inactive"},
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST, detail="User account is inactive or not found"
-                )
-
-            tenant = await transaction_db.get(Tenant, user.tenant_id)
-            if not tenant or tenant.status != TenantStatus.ACTIVE:
-                await session_service_client.terminate_session(session_id)
-                await log_audit_event(
-                    event_type="token_refresh_failed",
-                    user_id=user_id,
-                    details={
-                        "client_ip": client_ip,
-                        "session_id": session_id,
-                        "tenant_status": tenant.status.value if tenant else "None",
-                        "reason": "inactive_tenant",
-                    },
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST, detail=f"Tenant account is {tenant.status.value.lower() if tenant else 'invalid'}"
-                )
-
-            if token_data.jti and await is_token_blacklisted(db, token_data.jti):
-                await session_service_client.terminate_session(session_id)
-                await log_audit_event(
-                    event_type="token_refresh_failed",
-                    user_id=user_id,
-                    details={"client_ip": client_ip, "session_id": session_id, "reason": "token_blacklisted"},
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token has been revoked"
-                )
-
-            access_token_expires = timedelta(minutes=auth_manager.access_token_expire_minutes)
-            new_token_data = {
-                "sub": str(user.id),
-                "user_id": str(user.id),
-                "email": user.email,
-                "tenant_id": str(user.tenant_id),
-                "session_id": session_id,
-                "iat": datetime.now(timezone.utc),
-                "exp": datetime.now(timezone.utc) + access_token_expires,
-            }
-
-            new_access_token = auth_manager.create_access_token(
-                data=new_token_data,
-                expires_in=access_token_expires,
-                tenant_id=str(user.tenant_id),
-                roles=[user.role.value],
-                scopes=[],
-                session_id=session_id,
-            )
-
-            if should_rotate:
-                refresh_token_expires_delta = timedelta(days=settings.refresh_token_expire_days)
-                if settings.refresh_token_expire_minutes:
-                    refresh_token_expires_delta = timedelta(minutes=settings.refresh_token_expire_minutes)
-
-                new_refresh_token_raw = auth_manager.create_refresh_token(
-                    data={"user_id": str(user.id), "session_id": session_id},
-                    expires_in=refresh_token_expires_delta,
-                    session_id=session_id,
-                    user_id=str(user.id),
-                )
-                new_refresh_token_hash = hashlib.sha256(new_refresh_token_raw.encode()).hexdigest()
-
-                session_update_data = {
-                    "previous_refresh_token_hash": current_hash,
-                    "previous_refresh_token_expires_at": (
-                        datetime.now(timezone.utc) + timedelta(seconds=settings.refresh_token_grace_period_seconds)
-                    ).isoformat(),
-                    "refresh_token_hash": new_refresh_token_hash,
-                    "last_accessed": datetime.now(timezone.utc).isoformat(),
-                    "user_agent": user_agent,
-                }
-
-                update_success = await session_service_client.update_session(session_id, session_update_data)
-
-                if not update_success:
-                    await session_service_client.terminate_session(session_id)
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail="Failed to update session with new refresh token",
-                    )
-
-                await store_refresh_token_securely(
-                    session_id,
-                    new_refresh_token_raw,
-                    int(refresh_token_expires_delta.total_seconds()),
-                )
-
-                response.set_cookie(
-                    key="refresh_token",
-                    value=new_refresh_token_raw,
-                    httponly=True,
-                    secure=True,
-                    samesite="lax",
-                    path="/auth",
-                    expires=datetime.now(timezone.utc) + refresh_token_expires_delta,
-                )
-
-            await log_audit_event(
-                event_type="token_refresh_success",
-                user_id=user_id,
-                details={"client_ip": client_ip, "session_id": session_id, "rotated": should_rotate},
-            )
-
-            return TokenResponse(
-                access_token=new_access_token,
-                token_type="bearer",
-                expires_in=int(access_token_expires.total_seconds()),
-                tenant_status=tenant.status.value,
-            )
-
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        debug_logger.error(f"Unexpected error in refresh_access_token: {e}", exc_info=True)
-        await log_audit_event(
-            event_type="token_refresh_failed",
-            user_id=getattr(token_data, 'user_id', None),
-            details={"client_ip": client_ip, "reason": "unexpected_error", "error": str(e)},
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An unexpected error occurred during token refresh.",
-        )
+ 
 
 @router.post("/password/change")
 async def change_password(
@@ -955,3 +656,179 @@ async def read_users_me(current_user: BaseUser = Depends(get_current_active_user
         "email": current_user.email,
         "role": current_user.role.value if hasattr(current_user, 'role') else 'N/A'
     }
+
+@router.post("/refresh", response_model=TokenResponse)
+async def refresh_access_token(
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(db_manager.get_session)
+):
+    try:
+        refresh_token = request.cookies.get("refresh_token")
+        debug_logger.debug(f"Checking for refresh token cookie: refresh_token present? {refresh_token is not None}")
+        if not refresh_token:
+            raise HTTPException(status_code=400, detail="Refresh token missing")
+        
+        # Decode refresh token with specific exception handling
+        try:
+            token_data = await auth_manager.decode_refresh_token(refresh_token)
+            if not token_data or not token_data.user_id or not token_data.session_id:
+                raise HTTPException(status_code=401, detail="Invalid refresh token")
+        except TokenExpiredError as e:
+            debug_logger.warning(f"Refresh token expired for IP {request.client.host}: {e}")
+            raise HTTPException(status_code=401, detail="Refresh token expired. Please log in again.") from e
+        except JWTError as e:
+            debug_logger.error(f"JWT decoding error: {e}")
+            raise HTTPException(status_code=401, detail="Invalid token format. Please log in again.") from e
+        except Exception as e:
+            debug_logger.error(f"Unexpected error decoding token: {e}")
+            raise HTTPException(status_code=500, detail="Internal error decoding token") from e
+        
+        user_id = token_data.user_id
+        session_id = token_data.session_id
+        client_ip = request.client.host
+        
+        log_details = {
+            "client_ip": client_ip,
+            "session_id": session_id
+        }
+        
+        # Add monitoring metrics for token refresh start
+        start_time = time.time()
+        debug_logger.info(f"Token refresh started for session {session_id}. Details: {log_details}")
+        
+        # Retry logic for session retrieval (unchanged)
+        max_retries = 3
+        retry_delay = 1  # seconds
+        for attempt in range(max_retries):
+            try:
+                debug_logger.debug(f"Attempt {attempt + 1} to retrieve session with ID: {session_id}")
+                session_info = await session_service_client.get_session(session_id)
+                if session_info and session_info.get("user_id") == user_id:
+                    break  # Session found, exit retry loop
+                elif session_info is None or 'error' in session_info and session_info['error'] == 404:
+                    if attempt < max_retries - 1:
+                        debug_logger.warning(f"Session not found (404) on attempt {attempt + 1}, retrying in {retry_delay} seconds")
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    else:
+                        debug_logger.error(f"Session not found after {max_retries} attempts. Details: {log_details | {'failure_reason': 'session_not_found_after_retries'}}")
+                        raise HTTPException(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Session not found or expired. Please log in again.",
+                            headers={"WWW-Authenticate": "Bearer"}
+                        )
+                else:
+                    debug_logger.error(f"Unexpected session service response: {session_info}. Details: {log_details}")
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Internal server error in session service"
+                    )
+            except aiohttp.ClientError as e:  # Specific network error handling
+                if attempt < max_retries - 1:
+                    debug_logger.warning(f"Network error retrieving session on attempt {attempt + 1}: {e}, retrying in {retry_delay} seconds")
+                    await asyncio.sleep(retry_delay)
+                    continue
+                else:
+                    debug_logger.error(f"Network failure retrieving session after retries: {e}. Details: {log_details}")
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Session service unavailable. Try again later."
+                    ) from e
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    debug_logger.warning(f"General error retrieving session on attempt {attempt + 1}: {e}, retrying in {retry_delay} seconds")
+                    await asyncio.sleep(retry_delay)
+                    continue
+                else:
+                    debug_logger.error(f"Failed to retrieve session after retries: {e}. Details: {log_details}")
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Failed to retrieve session due to an internal error"
+                    ) from e
+        
+        # Atomic transaction for database operations
+        async with atomic_session_operation(db) as transaction_db:
+            try:
+                # Fetch user
+                user = await transaction_db.get(User, UUIDType(user_id))
+                if not user or not user.is_active:
+                    debug_logger.error(f"User not found or inactive during refresh. Details: {log_details | {'failure_reason': 'user_not_found_or_inactive'}}")
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="User not found or inactive. Please log in again.",
+                        headers={"WWW-Authenticate": "Bearer"}
+                    )
+                
+                # Security validation
+                if not await validate_session_security(session_info, request):
+                    debug_logger.error(f"Security validation failed for session {session_id}. Details: {log_details}")
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Session security validation failed. Please log in again.",
+                        headers={"WWW-Authenticate": "Bearer"}
+                    )
+                
+                # Generate new tokens
+                access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
+                access_token = await auth_manager.create_access_token(
+                    data={"sub": user_id, "session_id": session_id},
+                    expires_delta=access_token_expires
+                )
+                
+                refresh_token_expires = timedelta(days=settings.refresh_token_expire_days)
+                refresh_token = await auth_manager.create_refresh_token(
+                    data={"sub": user_id, "session_id": session_id},
+                    expires_delta=refresh_token_expires
+                )
+                
+                # Store new refresh token securely
+                await store_refresh_token_securely(
+                    session_id,
+                    refresh_token,
+                    int(refresh_token_expires.total_seconds())
+                )
+                
+                # Audit logging
+                await log_audit_event(
+                    event_type="token_refresh_success",
+                    user_id=user_id,
+                    details=log_details
+                )
+                
+                # Set cookie
+                response.set_cookie(
+                    key="refresh_token",
+                    value=refresh_token,
+                    httponly=True,
+                    secure=settings.environment == "production",
+                    samesite="strict",
+                    path="/auth",
+                    expires=int(refresh_token_expires.total_seconds())
+                )
+                
+                return {
+                    "access_token": access_token,
+                    "token_type": "bearer",
+                    "expires_in": int(access_token_expires.total_seconds())
+                }
+            except SQLAlchemyError as db_err:
+                debug_logger.error(f"Database error during token refresh: {db_err}. Transaction rolled back. Details: {log_details}")
+                raise HTTPException(status_code=500, detail="Database error, transaction rolled back.") from db_err
+            except Exception as e:
+                debug_logger.error(f"Unexpected error in transaction: {e}. Transaction rolled back. Details: {log_details}")
+                raise HTTPException(status_code=500, detail="Internal error during token refresh, transaction rolled back.") from e
+        
+        # Add monitoring metrics for token refresh completion
+        end_time = time.time()
+        duration = end_time - start_time
+        debug_logger.info(f"Token refresh completed successfully for session {session_id}. Duration: {duration:.2f} seconds. Details: {log_details}")
+        # Increment a counter for successful refreshes (e.g., using a metrics library if available, or simple logging)
+    except HTTPException:
+        raise
+    except Exception as e:
+        end_time = time.time()
+        duration = end_time - start_time if 'start_time' in locals() else 0
+        debug_logger.error(f"Token refresh failed for session {session_id}. Duration: {duration:.2f} seconds. Error: {e}. Details: {log_details}")
+        debug_logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="Internal server error")
