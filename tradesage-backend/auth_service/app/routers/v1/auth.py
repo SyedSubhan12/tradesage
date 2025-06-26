@@ -801,10 +801,11 @@ async def refresh_access_token(
                     key="refresh_token",
                     value=refresh_token,
                     httponly=True,
-                    secure=settings.environment == "production",
-                    samesite="strict",
-                    path="/auth",
-                    expires=int(refresh_token_expires.total_seconds())
+                    secure=settings.cookie_secure,
+                    samesite=settings.cookie_samesite,
+                    path=settings.cookie_path,
+                    max_age=int(refresh_token_expires.total_seconds()),
+                    domain=settings.cookie_domain
                 )
                 
                 return {

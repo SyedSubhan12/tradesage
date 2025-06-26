@@ -9,7 +9,14 @@ from common.database import DatabaseManager
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://zs:Zunairasubhan@localhost/tradesage")
 
 # Create async engine
-engine = create_async_engine(DATABASE_URL)
+engine = create_async_engine(
+    DATABASE_URL,
+    pool_size=20,
+    max_overflow=30,
+    pool_pre_ping=True,
+    pool_recycle=3600,
+    echo=False  # Set to True for SQL debugging
+)
 
 # Create async session factory
 SessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)

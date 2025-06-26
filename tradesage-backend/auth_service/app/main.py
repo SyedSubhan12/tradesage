@@ -200,42 +200,35 @@ async def health_check(response: Response):
     Checks database and Redis connectivity.
     Returns 200 if healthy, 503 if any dependency is unhealthy.
     """
-    db_status = "ok"
-    redis_status = "ok"
-    is_healthy = True
-
+    health_status = {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "checks": {}
+    }
+    
+    # Database health check
     try:
-        # Check database connection
         async with db_manager.get_session() as session:
             await session.execute(text("SELECT 1"))
+        health_status["checks"]["database"] = "healthy"
     except Exception as e:
-        db_status = "error"
-        is_healthy = False
+        health_status["checks"]["database"] = f"unhealthy: {str(e)}"
+        health_status["status"] = "unhealthy"
         logger.error("Database health check failed", error=e)
 
+    # Redis health check
     try:
-        # Check Redis connection
         await redis_manager.ping()
+        health_status["checks"]["redis"] = "healthy"
     except Exception as e:
-        redis_status = "error"
-        is_healthy = False
+        health_status["checks"]["redis"] = f"unhealthy: {str(e)}"
+        health_status["status"] = "degraded"
         logger.error("Redis health check failed", error=e)
 
-    response_payload = {
-        "status": "ok" if is_healthy else "error",
-        "version": "1.0.0",
-        "service": "auth_service",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "dependencies": {
-            "database": db_status,
-            "redis": redis_status,
-        },
-    }
-
-    if not is_healthy:
+    if health_status["status"] != "healthy":
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-
-    return response_payload
+    
+    return health_status
 
 
 # ================================
