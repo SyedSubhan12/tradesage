@@ -34,7 +34,7 @@ async def lifespan(app: FastAPI):
     
     # Manually create service instance for the background task
     session_service = SessionService(
-        session_factory=db_manager.session_factory,
+        session_factory=db_manager._async_session,
         redis_client=redis_client,
         encryption_key=settings.session_encryption_key,
         config=settings,

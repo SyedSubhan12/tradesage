@@ -530,38 +530,6 @@ class AuthManager:
             logger.error(f"Unexpected error during token decoding: {type(e).__name__}: {e}")
             return None
 
-    def extract_token_from_header(self, authorization: str) -> Optional[str]:
-        """
-        Extract JWT token from Authorization header.
-
-        Args:
-            authorization: Authorization header value (e.g., "Bearer <token>")
-
-        Returns:
-            Token string if valid format, None otherwise
-        """
-        if not authorization:
-            logger.error("No authorization header provided")
-            return None
-
-        # Handle case-insensitive Bearer prefix
-        if not authorization.lower().startswith("bearer "):
-            logger.error(f"Invalid authorization header format: missing Bearer prefix")
-            return None
-
-        token = authorization[7:].strip()  # Remove "Bearer " prefix
-
-        if not token:
-            logger.error("Empty token after Bearer prefix")
-            return None
-
-        # Basic format validation
-        if not self._validate_token_format(token):
-            logger.error("Token extracted from header failed format validation")
-            return None
-
-        return token
-
     def verify_token(self, token: str, is_refresh: bool = False) -> Optional[TokenData]:
         """
         Verify a token by decoding it and checking for a valid user_id.

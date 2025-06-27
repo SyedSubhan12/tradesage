@@ -46,7 +46,6 @@ setup_logging()
 logger = structlog.get_logger("tradesage.auth")
 
 
-
 # ================================
 # LIFESPAN MANAGEMENT
 # ================================
@@ -54,6 +53,10 @@ logger = structlog.get_logger("tradesage.auth")
 async def lifespan(app: FastAPI):
     # Startup
     try:
+        # Initialize database manager
+        db_manager.initialize(settings.database_url)
+        logger.info("Database manager initialized")
+
         await redis_manager.connect()
         logger.info("Redis connection established")
         
@@ -246,6 +249,26 @@ for route in app.routes:
         print(f"Path: {route.path}, Methods: {getattr(route, 'methods', 'N/A')}")
     except Exception as e:
         print(f"Route: {route}, Error: {e}")
+
+
+# ================================
+# SHUTDOWN EVENT HANDLER
+# ================================
+@app.on_event("shutdown")
+async def shutdown_event():
+    """
+    Properly close the database connection when the application shuts down.
+    """
+    try:
+        await db_manager.close()
+        print("Database connection closed successfully")
+    except Exception as e:
+        print(f"Error closing database connection: {e}")
+
+
+
+
+
 
 
 # ================================

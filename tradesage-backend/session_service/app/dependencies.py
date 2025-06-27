@@ -19,7 +19,7 @@ def get_session_service(
     """Dependency injector for the SessionService."""
     # The db_manager is a singleton; its factory is initialized once.
     return SessionService(
-        session_factory=db_manager.session_factory,
+        session_factory=db_manager.async_session,
         redis_client=redis_client,
         encryption_key=settings.session_encryption_key,
         config=settings,
