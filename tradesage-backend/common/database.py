@@ -185,7 +185,7 @@ async def atomic_session_operation(session: AsyncSession):
     Production-grade atomic transaction context manager with comprehensive error handling
     """
     transaction_id = str(uuid4())[:8]
-    operation_logger = logger.bind(transaction_id=transaction_id)
+    operation_logger = structlog.get_logger(__name__).bind(transaction_id=transaction_id)
     
     try:
         operation_logger.debug("Starting atomic transaction")
