@@ -172,13 +172,13 @@ async function refreshToken(refreshTokenValue) {
   logOperation('Token Refresh Started', { hasRefreshToken: !!refreshTokenValue });
 
   try {
-    // Send refresh JWT in the Authorization header
+    // Send refresh JWT as a cookie
     const response = await fetch(`${API_BASE_URL}/auth/refresh`, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${refreshTokenValue}`
-      }
+        'Content-Type': 'application/json'
+      },
+      credentials: 'include', // Ensure cookies are sent
       // no body needed
     });
 

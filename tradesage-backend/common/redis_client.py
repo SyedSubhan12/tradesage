@@ -11,6 +11,7 @@ class RedisManager:
     def __init__(self, redis_url: str = None):
         self.redis_url = str(redis_url) if redis_url else str(settings.redis_url)
         self.redis_client = None
+
     async def connect(self):
         """Connect to Redis using production-ready settings."""
         try:
@@ -25,16 +26,18 @@ class RedisManager:
                 retry_on_timeout=True,
                 health_check_interval=30
             )
-            await self.redis_client.ping()
+            await self.ping()
             logger.info("Redis connection established")
         except Exception as e:
             logger.error(f"Failed to connect to Redis: {e}")
             raise
+
     async def disconnect(self):
         """Disconnect from Redis"""
         if self.redis_client:
             await self.redis_client.aclose()
             logger.info("Disconnected from Redis")
+
     async def set(self, key:str, value:Any, expire:int=None):
         """Set a key-value pair in Redis"""
         try:
@@ -45,6 +48,7 @@ class RedisManager:
         except Exception as e:
             logger.error(f"Failed to set key {key}: {e}")
             raise
+
     async def get(self, key:str) -> Optional[Any]:
         """Get a value from Redis"""
         try:
@@ -58,6 +62,7 @@ class RedisManager:
         except Exception as e:
             logger.error(f"Failed to get key {key}: {e}")
             raise
+
     async def delete(self, key:str):
         """Delete a key from Redis"""
         try:
@@ -66,6 +71,7 @@ class RedisManager:
         except Exception as e:
             logger.error(f"Failed to delete key {key}: {e}")
             raise
+
     async def exist(self, key:str) -> bool:
         """Check if a key exists in Redis"""
         try:
@@ -73,7 +79,23 @@ class RedisManager:
         except Exception as e:
             logger.error(f"Failed to check key {key}: {e}")
             raise
-            
+
+    async def ping(self):
+        """Custom ping method to check Redis connectivity."""
+        try:
+            if hasattr(self.redis_client, 'ping'):
+                await self.redis_client.ping()
+            else:
+                await self.redis_client.set('ping_test', 'pong')
+                value = await self.redis_client.get('ping_test')
+                if value != 'pong':
+                    raise Exception("Redis ping test failed")
+                await self.redis_client.delete('ping_test')
+            return True
+        except Exception as e:
+            logger.error(f"Redis ping failed: {e}")
+            raise
+
     async def get_redis(self):
         """Get Redis client for dependency injection"""
         if not self.redis_client:

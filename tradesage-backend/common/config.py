@@ -140,7 +140,8 @@ class Settings(BaseSettings):
     CSP_POLICY: str = os.environ.get("CSP_POLICY", "default-src 'self'")
     
     # Cookie Settings
-    COOKIE_SECURE: bool = os.environ.get("COOKIE_SECURE", "true").lower() == "true"
+    COOKIE_SECURE: bool = True 
+    #os.environ.get("COOKIE_SECURE", "true").lower() == "true"
     COOKIE_SAMESITE: str = os.environ.get("COOKIE_SAMESITE", "lax")
     COOKIE_PATH: str = os.environ.get("COOKIE_PATH", "/auth")
     COOKIE_DOMAIN: Optional[str] = os.environ.get("COOKIE_DOMAIN")

@@ -93,25 +93,35 @@ class CookieManager:
     def _create_refresh_token_config(self) -> CookieConfig:
         """Create refresh token cookie configuration"""
         is_production = self.security_level == CookieSecurityLevel.PRODUCTION
-        
+    
+        same_site_setting = getattr(self.settings, 'COOKIE_SAMESITE', 'lax')
+        if not same_site_setting:
+            same_site_setting = 'none'
+
         return CookieConfig(
             name="refresh_token",
-            secure=is_production or getattr(self.settings, 'COOKIE_SECURE', True),
+            # FIX: Only use secure=True in production, False in development
+            secure=is_production,  # Remove the OR condition that forces True in dev
             httponly=True,
-            samesite=CookieSameSite(getattr(self.settings, 'COOKIE_SAMESITE', 'lax')),
-            path=getattr(self.settings, 'COOKIE_PATH', '/auth'),
+            samesite=CookieSameSite(str(same_site_setting).lower()),
+            path=getattr(self.settings, 'COOKIE_PATH', '/'),  # Also fix path to '/'
             domain=getattr(self.settings, 'COOKIE_DOMAIN', None) if is_production else None
         )
-    
+
     def _create_session_config(self) -> CookieConfig:
         """Create session cookie configuration"""
         is_production = self.security_level == CookieSecurityLevel.PRODUCTION
-        
+    
+        same_site_setting = getattr(self.settings, 'COOKIE_SAMESITE', 'lax')
+        if not same_site_setting:
+            same_site_setting = 'none'
+
         return CookieConfig(
             name="session_id",
-            secure=is_production or getattr(self.settings, 'COOKIE_SECURE', True),
+            # FIX: Only secure in production
+            secure=is_production,  # Remove the OR condition
             httponly=True,
-            samesite=CookieSameSite(getattr(self.settings, 'COOKIE_SAMESITE', 'lax')),
+            samesite=CookieSameSite(str(same_site_setting).lower()),
             path="/",
             domain=getattr(self.settings, 'COOKIE_DOMAIN', None) if is_production else None
         )
@@ -392,23 +402,77 @@ class CookieManager:
     # =============================================================================
     
     def _extract_via_standard_method(self, request: Request, result: CookieExtractionResult) -> CookieExtractionResult:
-        """Method 1: Standard FastAPI cookie extraction"""
+        """Method 1: Standard FastAPI cookie extraction with enhanced debugging"""
         try:
+            # Log all available cookies
+            all_cookies = dict(request.cookies)
+            result.debug_info['total_cookies'] = len(all_cookies)
+            result.debug_info['cookie_names'] = list(all_cookies.keys())
+            result.debug_info['request_path'] = str(request.url.path)
+            result.debug_info['configured_cookie_path'] = self.refresh_token_config.path
+        
+            # FIX: Define path_matches variable properly
+            request_path = str(request.url.path)
+            cookie_path = self.refresh_token_config.path
+            path_matches = request_path.startswith(cookie_path)
+            result.debug_info['path_matches'] = path_matches
+        
+            self.logger.info(f"Request path: {request_path}")
+            self.logger.info(f"Configured cookie path: {cookie_path}")
+            self.logger.info(f"Total cookies received: {len(all_cookies)}")
+            self.logger.info(f"Cookie names: {list(all_cookies.keys())}")
+
+            if not path_matches:
+                self.logger.warning(
+                    f"Path mismatch detected! Request path '{request_path}' "
+                    f"does not start with cookie path '{cookie_path}'"
+                )
+                result.errors.append(f"Path mismatch: request='{request_path}', cookie_path='{cookie_path}'")
+
+            # Try primary configured name
             token = request.cookies.get(self.refresh_token_config.name)
             if token:
                 result.token = token
                 result.method = "standard"
                 result.success = True
                 result.debug_info["standard_extraction"] = "success"
+            self.logger.info(f"Found token with configured name '{self.refresh_token_config.name}'")
+            return result
+        
+        # If primary name fails, try variations
+            refresh_variations = ['refresh_token', 'refreshToken', 'REFRESH_TOKEN', 'refresh-token']
+            for variation in refresh_variations:
+                value = request.cookies.get(variation)
+                if value:
+                    result.token = value
+                    result.method = f"standard_variation_{variation}"
+                    result.success = True
+                    result.debug_info["standard_extraction"] = f"success with variation '{variation}'"
+                    self.logger.info(f"Found token with name variation '{variation}'")
+                    return result
+
+        # Pattern match for any token-like cookies
+            token_cookies = {k: v for k, v in all_cookies.items() 
+                        if 'refresh' in k.lower() or 'token' in k.lower()}
+            if token_cookies:
+                result.debug_info["token_like_cookies"] = list(token_cookies.keys())
+                self.logger.info(f"Token-like cookies found: {list(token_cookies.keys())}")
+            
+            # If we found token-like cookies but none matched, log their values (truncated)
+            for name, value in token_cookies.items():
+                self.logger.info(f"Token-like cookie '{name}': {value[:20]}...")
             else:
-                result.debug_info["standard_extraction"] = "no_token"
-                result.debug_info["available_cookies"] = list(request.cookies.keys())
-                
+                result.debug_info["token_like_cookies"] = "none"
+                self.logger.info("No token-like cookies found")
+
+            result.debug_info["standard_extraction"] = "no_token"
+            result.debug_info["configured_name"] = self.refresh_token_config.name
+            
         except Exception as e:
             result.errors.append(f"Standard extraction failed: {str(e)}")
             result.debug_info["standard_extraction"] = f"error: {str(e)}"
-        
-        return result
+            self.logger.error(f"Standard extraction error: {str(e)}")
+            return result
     
     def _extract_via_header_parsing(self, request: Request, result: CookieExtractionResult) -> CookieExtractionResult:
         """Method 2: Manual header parsing"""
@@ -544,23 +608,45 @@ class CookieManager:
                 request.headers.get("X-Request-ID") or 
                 "unknown")
     
+    
     def _log_development_debug_info(self, request: Request, result: CookieExtractionResult):
         """Log comprehensive debugging info for development"""
+    
+        # Extract cookie header and parse manually
+        cookie_header = request.headers.get("cookie", "")
+        parsed_cookies = {}
+        if cookie_header:
+            try:
+                # Manual cookie parsing to see what's actually being sent
+                cookie_pairs = cookie_header.split(';')
+                for pair in cookie_pairs:
+                    if '=' in pair:
+                        name, value = pair.strip().split('=', 1)
+                        parsed_cookies[name] = value
+            except Exception as e:
+                self.logger.error(f"Cookie parsing error: {e}")
+    
         debug_data = {
-            "all_request_cookies": dict(request.cookies),
-            "cookie_header": request.headers.get("cookie", ""),
+            "request_url": str(request.url),
+            "request_path": str(request.url.path),
+            "request_method": getattr(request, 'method', 'unknown'),
+            "configured_cookie_path": self.refresh_token_config.path,
+            "configured_cookie_name": self.refresh_token_config.name,
+            "path_would_match": str(request.url.path).startswith(self.refresh_token_config.path),
+            "fastapi_cookies": dict(request.cookies),
+            "manual_parsed_cookies": parsed_cookies,
+            "cookie_header": cookie_header,
+            "cookie_header_length": len(cookie_header),
             "user_agent": request.headers.get("user-agent", ""),
             "origin": request.headers.get("origin", ""),
             "referer": request.headers.get("referer", ""),
             "content_type": request.headers.get("content-type", ""),
-            "request_method": getattr(request, 'method', 'unknown'),
-            "request_url": str(getattr(request, 'url', 'unknown')),
             "extraction_errors": result.errors,
             "extraction_debug": result.debug_info
         }
-        
-        self.logger.debug(
-            "Development debugging - comprehensive request info",
+    
+        self.logger.error(  # Using error level to ensure it's visible
+            "Detailed cookie debugging",
             **debug_data
         )
     
@@ -582,6 +668,61 @@ class CookieManager:
             })
         
         return headers
+    
+    def diagnose_cookie_issue(self, request: Request) -> Dict[str, Any]:
+        """
+        Comprehensive diagnostic function to identify cookie issues
+        Call this from your auth endpoint to get detailed diagnostics
+        """
+    
+        diagnosis = {
+            "request_info": {
+                "url": str(request.url),
+                "path": str(request.url.path),
+                "method": getattr(request, 'method', 'unknown'),
+                "scheme": str(request.url.scheme),
+            },
+            "cookie_config": {
+                "name": self.refresh_token_config.name,
+                "path": self.refresh_token_config.path,
+                "domain": self.refresh_token_config.domain,
+                "secure": self.refresh_token_config.secure,
+                "samesite": self.refresh_token_config.samesite.value,
+            },
+            "path_analysis": {
+                "request_path": str(request.url.path),
+                "cookie_path": self.refresh_token_config.path,
+                "path_matches": str(request.url.path).startswith(self.refresh_token_config.path),
+                "explanation": "Cookies are only sent if request path starts with cookie path"
+            },
+            "available_cookies": dict(request.cookies),
+            "cookie_header": request.headers.get("cookie", ""),
+            "recommendations": []
+        }
+    
+    # Analyze and provide recommendations
+        if not diagnosis["path_analysis"]["path_matches"]:
+            diagnosis["recommendations"].append(
+                f"CRITICAL: Path mismatch! Change cookie path from '{self.refresh_token_config.path}' to '/' "
+                f"or ensure all auth endpoints are under '{self.refresh_token_config.path}'"
+            )
+    
+        if not dict(request.cookies):
+            diagnosis["recommendations"].append(
+                "No cookies received at all - check if cookies are being set properly"
+            )
+        elif self.refresh_token_config.name not in dict(request.cookies):
+            diagnosis["recommendations"].append(
+                f"Cookie '{self.refresh_token_config.name}' not found - check cookie name consistency"
+            )
+    
+        if self.refresh_token_config.secure and request.url.scheme != "https":
+            diagnosis["recommendations"].append(
+                "Secure cookies require HTTPS - check if this is causing issues in development"
+        )
+    
+        return diagnosis
+
     
     def validate_cookie_security(self, request: Request) -> Dict[str, Any]:
         """Validate cookie security configuration"""
