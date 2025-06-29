@@ -3,8 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { api, LoginCredentials, RegisterData, TokenResponse } from './api';
 
-// Token refresh interval (e.g., 14 minutes, to be safe before a 15-min expiry)
-const TOKEN_REFRESH_INTERVAL = 14 * 60 * 1000;
+// Token refresh interval (e.g., 90 seconds, to be safe before a 2-minute expiry for testing)
+const TOKEN_REFRESH_INTERVAL = 90 * 1000; // 90 seconds for testing
 
 // Define user roles to match backend UserRole enum
 export enum UserRole {

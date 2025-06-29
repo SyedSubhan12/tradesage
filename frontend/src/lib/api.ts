@@ -8,6 +8,115 @@ const axiosInstance = axios.create({
   baseURL: API_BASE_URL,
 });
 
+// Enhanced refresh token management with exponential backoff and improved error handling
+interface RefreshTokenState {
+  promise: Promise<string | null> | null;
+  attempts: number;
+  lastAttempt: number;
+  maxAttempts: number;
+}
+
+const refreshTokenState: RefreshTokenState = {
+  promise: null,
+  attempts: 0,
+  lastAttempt: 0,
+  maxAttempts: 3
+};
+
+// Enhanced token validation
+const isTokenValid = (token: string | null): boolean => {
+  if (!token) return false;
+  
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1]));
+    const exp = payload.exp * 1000; // Convert to milliseconds
+    const now = Date.now();
+    
+    // Consider token valid if it doesn't expire within the next 5 minutes.
+    return exp > (now + 300_000); // 5-minute buffer
+  } catch (error) {
+    console.error('Invalid token format:', error);
+    return false;
+  }
+};
+
+// Define refreshAccessToken first
+const refreshAccessToken = async (): Promise<TokenResponse> => {
+  const refreshToken = localStorage.getItem('refresh_token');
+  if (!refreshToken) {
+    throw new Error('No refresh token available');
+  }
+
+  // Validate refresh token before attempting refresh
+  if (!isTokenValid(refreshToken)) {
+    console.error('Refresh token is expired or invalid');
+    throw new Error('Refresh token is invalid');
+  }
+
+  // Exponential backoff calculation
+  const baseDelay = 1000; // 1 second
+  const backoffDelay = Math.min(baseDelay * Math.pow(2, refreshTokenState.attempts), 30000); // Max 30 seconds
+  
+  if (refreshTokenState.attempts > 0) {
+    const timeSinceLastAttempt = Date.now() - refreshTokenState.lastAttempt;
+    if (timeSinceLastAttempt < backoffDelay) {
+      const waitTime = backoffDelay - timeSinceLastAttempt;
+      debugLog(`Applying exponential backoff: waiting ${waitTime}ms before retry`);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+  }
+
+  refreshTokenState.lastAttempt = Date.now();
+  refreshTokenState.attempts++;
+
+  try {
+    debugLog(`🚀 Attempting token refresh (attempt ${refreshTokenState.attempts}/${refreshTokenState.maxAttempts})`);
+    
+    const response = await axiosInstance.post<TokenResponse>('/auth/refresh', 
+      {}, // No body needed for this request
+      {
+        headers: {
+          Authorization: `Bearer ${refreshToken}`,
+        },
+        timeout: 10000, // 10 second timeout
+      }
+    );
+
+    // Reset attempts on success
+    refreshTokenState.attempts = 0;
+    refreshTokenState.lastAttempt = 0;
+    
+    debugLog('✅ Token refresh successful');
+    
+    // Store the new access token
+    localStorage.setItem('access_token', response.data.access_token);
+    
+    // Handle refresh token renewal cycle
+    if (response.data.refresh_token) {
+      // New refresh token provided - this happens when old token is close to expiry (7 days)
+      localStorage.setItem('refresh_token', response.data.refresh_token);
+      debugLog("🔄 New refresh token received - 30-day renewal cycle activated");
+    } else {
+      // No new refresh token - continue using existing one
+      debugLog("✅ Using existing refresh token (still valid for current 30-day cycle)");
+    }
+    
+    return response.data;
+    
+  } catch (error) {
+    console.error(`❌ Token refresh failed (attempt ${refreshTokenState.attempts}):`, error);
+    
+    if (refreshTokenState.attempts >= refreshTokenState.maxAttempts) {
+      console.error('Max refresh attempts reached. Logging out.');
+      refreshTokenState.attempts = 0;
+      refreshTokenState.lastAttempt = 0;
+      throw new Error('Max refresh attempts exceeded');
+    }
+    
+    throw error;
+  }
+};
+
 // --- Axios Request Interceptor ---
 // This interceptor will automatically add the access token to every request,
 // except for the refresh token endpoint.
@@ -35,73 +144,117 @@ axiosInstance.interceptors.request.use(
   }
 );
 
-// --- Axios Response Interceptor for Token Refresh (Race Condition Handled) ---
-
-// A single promise to which all concurrent requests can subscribe.
-let refreshTokenPromise: Promise<string | null> | null = null;
-
+// --- Axios Response Interceptor for Token Refresh (Enhanced Race Condition Protection) ---
 axiosInstance.interceptors.response.use(
   (response) => response,
   async (error: AxiosError) => {
     const originalRequest = error.config as AxiosRequestConfig & { _retry?: boolean };
 
-    // Reject if not a 401, or if the request has no config.
+    // Enhanced error handling
     if (error.response?.status !== 401 || !originalRequest) {
+      // Handle specific error cases
+      if (error.response?.status === 403) {
+        console.error('Access forbidden. User may not have proper permissions.');
+      } else if (error.response?.status === 429) {
+        console.warn('Rate limit exceeded. Retrying after delay.');
+        // Could implement rate limit handling here
+      }
       return Promise.reject(error.response?.data || error);
     }
 
-    // If the failed request was already for a token refresh, then the refresh token is bad.
-    // We must stop and log out the user.
+    // If the failed request was already for a token refresh, handle appropriately
     if (originalRequest.url?.endsWith('/auth/refresh')) {
       console.error("Refresh token is invalid or expired. Logging out.");
+      
+      // Clear all tokens and state
       localStorage.removeItem('access_token');
       localStorage.removeItem('refresh_token');
-      refreshTokenPromise = null;
+      refreshTokenState.promise = null;
+      refreshTokenState.attempts = 0;
+      refreshTokenState.lastAttempt = 0;
+      
+      // Redirect to login
       window.location.href = '/auth/login';
       return Promise.reject(error);
     }
 
-    // If no refresh is currently in progress, start one.
-    if (!refreshTokenPromise) {
-      console.log("No refresh in progress. Starting a new one.");
-      refreshTokenPromise = new Promise(async (resolve, reject) => {
+    // Prevent multiple refresh attempts for the same token
+    if (originalRequest._retry) {
+      console.error('Request already retried once. Rejecting.');
+      return Promise.reject(error);
+    }
+
+    // Mark this request as being retried
+    originalRequest._retry = true;
+
+    // If no refresh is currently in progress, start one
+    if (!refreshTokenState.promise) {
+      debugLog("Starting new token refresh operation");
+      
+      refreshTokenState.promise = new Promise(async (resolve, reject) => {
         try {
-          console.log('Access token expired. Attempting to refresh...');
           const tokenResponse = await refreshAccessToken();
           const newAccessToken = tokenResponse.access_token;
 
+          // Validate the new token before storing
+          if (!isTokenValid(newAccessToken)) {
+            throw new Error('Received invalid access token from refresh');
+          }
+
           localStorage.setItem('access_token', newAccessToken);
+          
+          // Handle refresh token renewal cycle
           if (tokenResponse.refresh_token) {
+            // New refresh token provided - this happens when old token is close to expiry (7 days)
             localStorage.setItem('refresh_token', tokenResponse.refresh_token);
-            console.log("New refresh token stored.");
+            debugLog("🔄 New refresh token received - 30-day renewal cycle activated");
+          } else {
+            // No new refresh token - continue using existing one
+            debugLog("✅ Using existing refresh token (still valid for current 30-day cycle)");
           }
           
-          console.log("Token refresh successful.");
+          debugLog("Token refresh operation completed successfully");
           resolve(newAccessToken);
+          
         } catch (refreshError) {
-          console.error("Failed to refresh token. Logging out.", refreshError);
+          console.error("Token refresh operation failed:", refreshError);
+          
+          // Clear tokens on failure
           localStorage.removeItem('access_token');
           localStorage.removeItem('refresh_token');
+          
+          // Redirect to login
           window.location.href = '/auth/login';
           reject(refreshError);
+          
         } finally {
-          // The refresh attempt is complete, so clear the promise for the next time.
-          refreshTokenPromise = null;
+          // Clear the promise for next time
+          refreshTokenState.promise = null;
         }
       });
     } else {
-      console.log("A refresh is already in progress. Waiting for it to complete.");
+      debugLog("Token refresh already in progress. Waiting for completion.");
     }
 
-    // Wait for the single refresh promise to resolve, then retry the original request.
-    return refreshTokenPromise.then((token) => {
-      if (token && originalRequest.headers) {
-        originalRequest.headers['Authorization'] = 'Bearer ' + token;
+    // Wait for the refresh operation to complete
+    try {
+      const newToken = await refreshTokenState.promise;
+      
+      if (newToken && originalRequest.headers) {
+        // Update the original request with new token
+        originalRequest.headers['Authorization'] = `Bearer ${newToken}`;
+        
+        // Retry the original request
+        debugLog("Retrying original request with new token");
         return axiosInstance(originalRequest);
       }
-      // If token is null (which shouldn't happen here, but as a safeguard), reject.
-      return Promise.reject(error);
-    });
+      
+      return Promise.reject(new Error('Token refresh completed but no valid token received'));
+      
+    } catch (refreshError) {
+      console.error("Failed to wait for token refresh:", refreshError);
+      return Promise.reject(refreshError);
+    }
   }
 );
 
@@ -127,30 +280,6 @@ export interface TokenResponse {
   expires_in: number;
   tenant_status: string;
 }
-
-
-
-// --- Definitive Fix: Separate function for refreshing the token ---
-// This function calls the refresh endpoint directly, bypassing the interceptor logic
-// that adds the access token, and instead sends the refresh token.
-const refreshAccessToken = async (): Promise<TokenResponse> => {
-  const refreshToken = localStorage.getItem('refresh_token');
-  if (!refreshToken) {
-    return Promise.reject(new Error('No refresh token available'));
-  }
-
-  console.log("🚀 Sending to /auth/refresh with REFRESH token:", refreshToken);
-  const response = await axiosInstance.post<TokenResponse>('/auth/refresh', 
-    {}, // No body needed for this request
-    {
-      headers: {
-        // Explicitly set the Authorization header with the refresh token
-        Authorization: `Bearer ${refreshToken}`,
-      },
-    }
-  );
-  return response.data;
-};
 
 // Auth API calls refactored to use axios
 export const api = {
@@ -215,28 +344,91 @@ export const api = {
   },
 };
 
-// Add proactive token refresh logic
-setInterval(async () => {
-  const accessToken = localStorage.getItem('access_token');
-  if (accessToken) {
-    const tokenData = JSON.parse(atob(accessToken.split('.')[1])); // Decode JWT payload
-    const exp = tokenData.exp * 1000; // JWT exp is in seconds, convert to ms
-    const now = Date.now();
-    const expiresAt = new Date(exp).toISOString(); // Ensure UTC handling
-    if ((exp - now) < 300000) { // Less than 5 minutes remaining
-      try {
-        const newTokenResponse = await refreshAccessToken();
-        localStorage.setItem('access_token', newTokenResponse.access_token);
-        if (newTokenResponse.refresh_token) {
-          localStorage.setItem('refresh_token', newTokenResponse.refresh_token);
-        }
-        console.log('Proactive token refresh successful.');
-      } catch (error) {
-        console.error('Proactive refresh failed. Logging out.', error);
+// Enhanced proactive token refresh with better error handling
+const startProactiveRefresh = () => {
+  let refreshInterval: NodeJS.Timeout;
+  
+  const performProactiveRefresh = async () => {
+    try {
+      const accessToken = localStorage.getItem('access_token');
+      if (!accessToken) {
+        // No access token found - user is likely not logged in
+        // Skip this check and try again later without logging
+        return;
+      }
+
+      if (!isTokenValid(accessToken)) {
+        console.log('Access token is invalid or expired. Clearing and redirecting.');
         localStorage.removeItem('access_token');
         localStorage.removeItem('refresh_token');
         window.location.href = '/auth/login';
+        return;
       }
+
+      const payload = JSON.parse(atob(accessToken.split('.')[1]));
+      const exp = payload.exp * 1000;
+      const now = Date.now();
+      const timeUntilExpiry = exp - now;
+
+      debugLog(`[Proactive Refresh Check] Token expires in ${Math.round(timeUntilExpiry / 1000)}s`);
+
+      // Trigger refresh when the token is within 5 minutes of expiring
+      if (timeUntilExpiry < 300_000) { // 5 minutes
+        debugLog(`Token expires in ${Math.round(timeUntilExpiry / 1000)}s. Starting proactive refresh.`);
+        
+        if (!refreshTokenState.promise) {
+          const newTokenResponse = await refreshAccessToken();
+          localStorage.setItem('access_token', newTokenResponse.access_token);
+          
+          // Handle refresh token renewal cycle
+          if (newTokenResponse.refresh_token) {
+            // New refresh token provided - this happens when old token is close to expiry (7 days)
+            localStorage.setItem('refresh_token', newTokenResponse.refresh_token);
+            debugLog("🔄 New refresh token received - 30-day renewal cycle activated");
+          } else {
+            // No new refresh token - continue using existing one
+            debugLog("✅ Using existing refresh token (still valid for current 30-day cycle)");
+          }
+          
+          debugLog('✅ Proactive token refresh successful');
+        } else {
+          debugLog('Refresh already in progress. Skipping proactive refresh.');
+        }
+      }
+    } catch (error) {
+      console.error('❌ Proactive refresh failed:', error);
     }
+  };
+
+  // Check every minute – sufficient for 1-day tokens while keeping CPU/network low
+  refreshInterval = setInterval(performProactiveRefresh, 60_000); // 1 minute
+  performProactiveRefresh();
+  
+  return () => {
+    if (refreshInterval) {
+      clearInterval(refreshInterval);
+    }
+  };
+};
+
+// Start proactive refresh
+const stopProactiveRefresh = startProactiveRefresh();
+
+// Export cleanup function for testing or manual cleanup
+export const cleanupTokenRefresh = () => {
+  refreshTokenState.promise = null;
+  refreshTokenState.attempts = 0;
+  refreshTokenState.lastAttempt = 0;
+  stopProactiveRefresh();
+};
+
+// ---------------------------------------------------------------------------
+// Lightweight conditional logger – noisy/diagnostic output only in development
+// ---------------------------------------------------------------------------
+const isDev = import.meta.env.MODE !== 'production';
+const debugLog = (...args: unknown[]) => {
+  if (isDev) {
+    // eslint-disable-next-line no-console
+    console.debug(...args);
   }
-}, 300000); // Check every 5 minutes (300,000 ms)
+};

@@ -42,10 +42,10 @@ class Settings(BaseSettings):
     jwt_public_key_path: str = "certs/ecdsa-public.pem"
 
     # Token Settings
-    access_token_expire_minutes: int = 15
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15  # For compatibility
-    refresh_token_expire_days: int = 30
-    refresh_token_expire_minutes: Optional[int] = None
+    access_token_expire_minutes: int = 2  # 2 minutes for testing
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 2  # For compatibility
+    refresh_token_expire_days: int = 30  # Keep 30-day sessions
+    refresh_token_expire_minutes: Optional[int] = 5  # Added 5 minutes for testing
     refresh_token_grace_period_seconds: int = 60
     jwt_issuer: str = "tradesage-auth-service"
     bcrypt_rounds: int = 12
@@ -145,6 +145,10 @@ class Settings(BaseSettings):
     COOKIE_SAMESITE: str = os.environ.get("COOKIE_SAMESITE", "lax")
     COOKIE_PATH: str = os.environ.get("COOKIE_PATH", "/auth")
     COOKIE_DOMAIN: Optional[str] = os.environ.get("COOKIE_DOMAIN")
+    
+    # Token Extraction Strategy (Production Optimization)
+    PREFERRED_TOKEN_EXTRACTION: str = os.environ.get("PREFERRED_TOKEN_EXTRACTION", "auto")  # auto, header, cookie
+    ENABLE_TOKEN_EXTRACTION_OPTIMIZATION: bool = os.environ.get("ENABLE_TOKEN_EXTRACTION_OPTIMIZATION", "true").lower() == "true"
     
     # Email Configuration (for production)
     MAIL_USERNAME: str = os.environ.get("MAIL_USERNAME", "")

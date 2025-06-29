@@ -1,0 +1,40 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'tradesage-node'
+    static_configs:
+      - targets: ['localhost:3000']
+    metrics_path: '/metrics'
+    scheme: 'http'
+
+  - job_name: 'node-startup-metrics'
+    static_configs:
+      - targets: ['localhost:3000']
+    metrics_path: '/startup-metrics'
+    scheme: 'http'
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['localhost:9093']
+
+rules:
+  - alert: NodeStartupError
+    expr: node_startup_errors_total > 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Node.js startup errors detected"
+      description: "Application startup errors have been detected. Check logs for details."
+
+  - alert: CWDValidationError
+    expr: node_cwd_validation_errors_total > 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Working directory validation errors"
+      description: "CWD validation errors detected. Check application logs and directory permissions." 

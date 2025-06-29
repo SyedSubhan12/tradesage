@@ -35,6 +35,10 @@ class TokenBlacklist(Base):
         server_default=func.now(),
         nullable=False
     )
+    reason = Column(
+        String(255),
+        nullable=True
+    )
 
     # Relationship back to User
     user = relationship("User", back_populates="blacklisted_tokens")

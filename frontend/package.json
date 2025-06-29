@@ -1,14 +1,21 @@
 {
-  "name": "vite_react_shadcn_ts",
+  "name": "tradesage-frontend",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "prestart": "node -e \"if (require('fs').existsSync(process.cwd())) process.exit(0); process.chdir(require('path').resolve(__dirname));\"",
+    "start": "vite",
     "dev": "vite",
-    "build": "vite build",
+    "build": "tsc && vite build",
     "build:dev": "vite build --mode development",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "validate:env": "node -e \"console.log('Current directory:', require('path').resolve(process.cwd())); require('fs').accessSync(process.cwd(), require('fs').constants.R_OK | require('fs').constants.W_OK);\"",
+    "clean": "rm -rf dist node_modules/.vite",
+    "safe:start": "./run.sh start",
+    "safe:dev": "./run.sh dev",
+    "safe:validate": "./run.sh validate"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.0",
@@ -39,8 +46,9 @@
     "@radix-ui/react-toggle": "^1.1.0",
     "@radix-ui/react-toggle-group": "^1.1.0",
     "@radix-ui/react-tooltip": "^1.1.4",
-    "@tanstack/react-query": "^5.56.2",
+    "@tanstack/react-query": "^5.81.5",
     "axios": "^1.10.0",
+    "caniuse-lite": "^1.0.30001726",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.0.0",
@@ -50,6 +58,7 @@
     "input-otp": "^1.2.4",
     "lucide-react": "^0.516.0",
     "next-themes": "^0.3.0",
+    "prom-client": "^15.1.0",
     "react": "^18.3.1",
     "react-day-picker": "^8.10.1",
     "react-dom": "^18.3.1",
@@ -66,6 +75,7 @@
     "tsparticles-engine": "^2.12.0",
     "tsparticles-path-polygon": "^2.12.0",
     "vaul": "^0.9.3",
+    "winston": "^3.11.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

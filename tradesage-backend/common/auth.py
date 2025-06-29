@@ -116,7 +116,7 @@ class AuthManager:
         self.pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
         self.bcrypt_rounds = settings.bcrypt_rounds
         self.oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-        self.access_token_expire_minutes = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 15))
+        self.access_token_expire_minutes = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 2))
         self.refresh_token_expire_days = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", 30))
         self.refresh_token_expire_minutes = settings.refresh_token_expire_minutes
 
@@ -229,7 +229,7 @@ class AuthManager:
             if padding != 4:
                 header_b64 += "=" * padding
 
-            # Use urlsafe decode to correctly handle “-” or “_”
+            # Use urlsafe decode to correctly handle "=" or "_"
             header_bytes = base64.urlsafe_b64decode(header_b64)
             header_json = json.loads(header_bytes.decode("utf-8", errors="replace"))
             return header_json
@@ -264,7 +264,14 @@ class AuthManager:
         elif "user_id" not in to_encode or not to_encode["user_id"]:
             raise ValueError("user_id must be set in token payload")
 
-        expire = datetime.now(timezone.utc) + (expires_in if expires_in else timedelta(minutes=15))  # Restore or set default expiration, assuming 15 minutes as a common default if not specified
+        # Convert expires_in to timedelta if it's an integer (seconds)
+        if isinstance(expires_in, int):
+            expires_in = timedelta(seconds=expires_in)
+
+        # Use provided expiry; if none, fall back to configured default in settings
+        expire = datetime.now(timezone.utc) + (
+            expires_in if expires_in else timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+        )
 
         # Get current time once
         now = datetime.now(timezone.utc)
@@ -584,7 +591,8 @@ class AuthManager:
                 return False
             
             now = datetime.now(timezone.utc).timestamp()
-            return (exp - now) < 300  # 5 minutes
+            # Refresh when the token is within 5 minutes (300 seconds) of expiry.
+            return (exp - now) < 300
         except Exception as e:
             logger.error(f"Token refresh check error: {e}")
             return False
@@ -638,7 +646,7 @@ async def verify_token(authorization: Optional[str] = Header(None)):
             detail="Missing Authorization header",
         )
 
-    # Extract and validate the “Bearer <token>” format
+    # Extract and validate the "Bearer <token>" format
     token = auth_manager.extract_token_from_header(authorization)
     if not token:
         raise HTTPException(

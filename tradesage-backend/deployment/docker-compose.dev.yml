@@ -78,7 +78,7 @@ services:
       - DATABASE_URL=postgresql+asyncpg://zs:Zunairasubhan@localhost:5432/tradesage
       - REDIS_URL=redis://:Zunairasubhan@localhost:6379
       - SECRET_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c
-      - ACCESS_TOKEN_EXPIRE_MINUTES=30
+      - ACCESS_TOKEN_EXPIRE_MINUTES=2
       - ENVIRONMENT=development
       - DEBUG=true
     depends_on:

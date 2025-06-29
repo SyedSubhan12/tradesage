@@ -382,7 +382,7 @@ async def get_current_user_from_access_token(
                         detail="Token has expired. Please refresh your token.",
                         headers={"WWW-Authenticate": "Bearer"}
                     )
-                elif time_until_expiry < 300:  # 5 minutes warning
+                elif time_until_expiry < 60:  # 1 minute warning for 2-minute tokens
                     context_logger.info(
                         "Access token expiring soon",
                         time_until_expiry=time_until_expiry
@@ -535,7 +535,7 @@ async def get_current_user_from_refresh_token(
             debug_token_validation(token, context_logger)
             
             # Check token blacklist
-            if await check_token_blacklist(token, context_logger):
+            if await check_token_blacklist(token, context_logger, db):
                 token_validation_requests.labels(status='failed', failure_reason='blacklisted').inc()
                 
                 raise HTTPException(

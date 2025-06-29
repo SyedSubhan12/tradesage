@@ -2,12 +2,41 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react-swc";
 import path from "path";
 
-// https://vitejs.dev/config/
-export default defineConfig(({ mode }) => ({
+// Detect if running in WSL
+const isWSL = process.platform === 'linux' && process.env.WSL_DISTRO_NAME;
+
+// Configuration for WSL environment
+const wslConfig = {
   server: {
-    host: true,
+    watch: {
+      usePolling: true, // Enable polling in WSL environment
+      interval: 100 // Polling interval
+    },
+    hmr: {
+      protocol: 'ws' // Use WebSocket for HMR
+    }
+  },
+  // Explicitly set the shell for spawn commands
+  process: {
+    // Use bash instead of powershell in WSL
+    SHELL: process.env.SHELL || '/bin/bash'
+  }
+};
+
+// https://vitejs.dev/config/
+export default defineConfig({
+  plugins: [react()],
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+    },
+  },
+  // Merge WSL-specific config when running in WSL
+  ...(isWSL ? wslConfig : {}),
+  // Additional common configuration
+  server: {
+    host: true, // Listen on all local IPs
     port: 8080,
-    open: true, // Auto-open browser
     strictPort: true, // Don't try other ports if 8080 is in use
     proxy: {
       // Proxy API requests to backend
@@ -23,23 +52,18 @@ export default defineConfig(({ mode }) => ({
         changeOrigin: true,
         secure: false
       }
-    }
-  },
-  plugins: [
-    react(),
-  ].filter(Boolean),
-  resolve: {
-    alias: {
-      "@": path.resolve(__dirname, "./src"),
     },
+    ...(isWSL ? wslConfig.server : {})
   },
   // Force CSS to be visible
   css: {
     devSourcemap: true,
   },
-  // Define environment variables
+  // Ensure proper environment variables
   define: {
     // This replaces process.env in the code
     'import.meta.env.VITE_API_URL': JSON.stringify('/api'),
-  },
-}));
+    'process.env.SHELL': JSON.stringify(process.env.SHELL || '/bin/bash'),
+    'process.env.PATH': JSON.stringify(process.env.PATH)
+  }
+});
