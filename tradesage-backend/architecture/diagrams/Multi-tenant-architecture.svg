@@ -1,0 +1,162 @@
+<svg viewBox="0 0 1200 1400" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .participant-box { fill: #e1f5fe; stroke: #0277bd; stroke-width: 2; }
+      .participant-text { font-family: Arial, sans-serif; font-size: 12px; text-anchor: middle; fill: #0277bd; font-weight: bold; }
+      .lifeline { stroke: #666; stroke-width: 1; stroke-dasharray: 5,5; }
+      .message-line { stroke: #333; stroke-width: 2; marker-end: url(#arrowhead); }
+      .return-line { stroke: #666; stroke-width: 1; stroke-dasharray: 3,3; marker-end: url(#arrowhead-dashed); }
+      .message-text { font-family: Arial, sans-serif; font-size: 10px; fill: #333; }
+      .note-box { fill: #fff3e0; stroke: #f57c00; stroke-width: 1; }
+      .note-text { font-family: Arial, sans-serif; font-size: 11px; fill: #e65100; font-weight: bold; }
+      .self-call { fill: none; stroke: #333; stroke-width: 2; marker-end: url(#arrowhead); }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#333" />
+    </marker>
+    <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#666" />
+    </marker>
+  </defs>
+
+  <!-- Participants -->
+  <rect x="20" y="20" width="80" height="40" class="participant-box"/>
+  <text x="60" y="35" class="participant-text">Client</text>
+  <text x="60" y="50" class="participant-text">C</text>
+
+  <rect x="150" y="20" width="100" height="40" class="participant-box"/>
+  <text x="200" y="35" class="participant-text">API Gateway</text>
+  <text x="200" y="50" class="participant-text">(8001)</text>
+
+  <rect x="300" y="20" width="100" height="40" class="participant-box"/>
+  <text x="350" y="35" class="participant-text">Auth Service</text>
+  <text x="350" y="50" class="participant-text">(8000)</text>
+
+  <rect x="450" y="20" width="100" height="40" class="participant-box"/>
+  <text x="500" y="35" class="participant-text">Tenant Service</text>
+  <text x="500" y="50" class="participant-text">(8003)</text>
+
+  <rect x="600" y="20" width="80" height="40" class="participant-box"/>
+  <text x="640" y="35" class="participant-text">PostgreSQL</text>
+  <text x="640" y="50" class="participant-text">PG</text>
+
+  <rect x="730" y="20" width="80" height="40" class="participant-box"/>
+  <text x="770" y="35" class="participant-text">Redis</text>
+  <text x="770" y="50" class="participant-text">R</text>
+
+  <rect x="860" y="20" width="80" height="40" class="participant-box"/>
+  <text x="900" y="35" class="participant-text">S3 Storage</text>
+  <text x="900" y="50" class="participant-text">S3</text>
+
+  <!-- Lifelines -->
+  <line x1="60" y1="60" x2="60" y2="1350" class="lifeline"/>
+  <line x1="200" y1="60" x2="200" y2="1350" class="lifeline"/>
+  <line x1="350" y1="60" x2="350" y2="1350" class="lifeline"/>
+  <line x1="500" y1="60" x2="500" y2="1350" class="lifeline"/>
+  <line x1="640" y1="60" x2="640" y2="1350" class="lifeline"/>
+  <line x1="770" y1="60" x2="770" y2="1350" class="lifeline"/>
+  <line x1="900" y1="60" x2="900" y2="1350" class="lifeline"/>
+
+  <!-- Authentication Flow Note -->
+  <rect x="60" y="80" width="880" height="25" class="note-box"/>
+  <text x="500" y="95" class="note-text" text-anchor="middle">Authentication Flow</text>
+
+  <!-- Authentication Flow Messages -->
+  <line x1="60" y1="120" x2="200" y2="120" class="message-line"/>
+  <text x="130" y="115" class="message-text">POST /api/auth/login</text>
+  <text x="130" y="127" class="message-text">{email, password}</text>
+
+  <!-- Self call for API Gateway -->
+  <path d="M 200 140 L 220 140 L 220 155 L 200 155" class="self-call"/>
+  <text x="225" y="150" class="message-text">Check public endpoint</text>
+
+  <line x1="200" y1="175" x2="350" y2="175" class="message-line"/>
+  <text x="275" y="170" class="message-text">Forward request</text>
+
+  <line x1="350" y1="195" x2="640" y2="195" class="message-line"/>
+  <text x="495" y="190" class="message-text">Query user by email</text>
+
+  <line x1="640" y1="215" x2="350" y2="215" class="return-line"/>
+  <text x="495" y="210" class="message-text">User data + tenant_id</text>
+
+  <!-- Self calls for Auth Service -->
+  <path d="M 350 235 L 370 235 L 370 250 L 350 250" class="self-call"/>
+  <text x="375" y="245" class="message-text">Verify password (bcrypt)</text>
+
+  <path d="M 350 270 L 370 270 L 370 290 L 350 290" class="self-call"/>
+  <text x="375" y="280" class="message-text">Generate JWT tokens</text>
+  <text x="375" y="292" class="message-text">(access + refresh)</text>
+
+  <line x1="350" y1="310" x2="770" y2="310" class="message-line"/>
+  <text x="560" y="305" class="message-text">Store session</text>
+
+  <line x1="350" y1="330" x2="200" y2="330" class="return-line"/>
+  <text x="275" y="325" class="message-text">{access_token, refresh_token}</text>
+
+  <line x1="200" y1="350" x2="60" y2="350" class="return-line"/>
+  <text x="130" y="345" class="message-text">Authentication success</text>
+
+  <!-- Tenant Creation Flow Note -->
+  <rect x="60" y="380" width="880" height="25" class="note-box"/>
+  <text x="500" y="395" class="note-text" text-anchor="middle">Tenant Creation Flow</text>
+
+  <!-- Tenant Creation Messages -->
+  <line x1="60" y1="420" x2="200" y2="420" class="message-line"/>
+  <text x="130" y="415" class="message-text">POST /api/tenants</text>
+  <text x="130" y="427" class="message-text">{name, plan}</text>
+
+  <path d="M 200 440 L 220 440 L 220 460 L 200 460" class="self-call"/>
+  <text x="225" y="452" class="message-text">Validate JWT + Admin role</text>
+
+  <line x1="200" y1="480" x2="500" y2="480" class="message-line"/>
+  <text x="350" y="475" class="message-text">Create tenant request</text>
+
+  <path d="M 500 500 L 520 500 L 520 520 L 500 520" class="self-call"/>
+  <text x="525" y="512" class="message-text">Generate secure schema name</text>
+
+  <line x1="500" y1="540" x2="640" y2="540" class="message-line"/>
+  <text x="570" y="535" class="message-text">CREATE SCHEMA tenant_xyz</text>
+
+  <line x1="500" y1="560" x2="640" y2="560" class="message-line"/>
+  <text x="570" y="555" class="message-text">Clone template tables</text>
+
+  <line x1="500" y1="580" x2="640" y2="580" class="message-line"/>
+  <text x="570" y="575" class="message-text">Apply RLS policies</text>
+
+  <line x1="500" y1="600" x2="640" y2="600" class="message-line"/>
+  <text x="570" y="595" class="message-text">Create tenant user</text>
+
+  <line x1="500" y1="620" x2="900" y2="620" class="message-line"/>
+  <text x="700" y="615" class="message-text">Schedule backup job</text>
+
+  <line x1="500" y1="640" x2="200" y2="640" class="return-line"/>
+  <text x="350" y="635" class="message-text">Tenant created (&lt;10s)</text>
+
+  <line x1="200" y1="660" x2="60" y2="660" class="return-line"/>
+  <text x="130" y="655" class="message-text">{tenant_id, status}</text>
+
+  <!-- API Request Flow Note -->
+  <rect x="60" y="690" width="880" height="25" class="note-box"/>
+  <text x="500" y="705" class="note-text" text-anchor="middle">API Request with Tenant Context</text>
+
+  <!-- API Request Messages -->
+  <line x1="60" y1="740" x2="200" y2="740" class="message-line"/>
+  <text x="130" y="735" class="message-text">GET /api/portfolios</text>
+  <text x="130" y="747" class="message-text">Auth: Bearer {token}</text>
+
+  <path d="M 200 760 L 220 760 L 220 780 L 200 780" class="self-call"/>
+  <text x="225" y="772" class="message-text">Extract &amp; validate JWT</text>
+
+  <path d="M 200 800 L 220 800 L 220 820 L 200 820" class="self-call"/>
+  <text x="225" y="812" class="message-text">Get tenant_id from token</text>
+
+  <line x1="200" y1="840" x2="640" y2="840" class="message-line"/>
+  <text x="420" y="835" class="message-text">Query tenant_xyz.portfolios</text>
+
+  <line x1="640" y1="860" x2="200" y2="860" class="return-line"/>
+  <text x="420" y="855" class="message-text">Portfolio data</text>
+
+  <line x1="200" y1="880" x2="60" y2="880" class="return-line"/>
+  <text x="130" y="875" class="message-text">{portfolios: [...]}</text>
+
+</svg>

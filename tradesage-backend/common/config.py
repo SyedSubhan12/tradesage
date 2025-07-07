@@ -22,10 +22,10 @@ from typing import Optional, List, Dict, Any
 class Settings(BaseSettings):
     # Database
     database_url: Optional[str] = os.environ.get("DATABASE_URL")
-    DATABASE_POOL_SIZE: int = 20
-    DATABASE_MAX_OVERFLOW: int = 30
+    DATABASE_POOL_SIZE: int = 50
+    DATABASE_MAX_OVERFLOW: int = 50
     DATABASE_POOL_TIMEOUT: int = 30
-    DATABASE_POOL_RECYCLE: int = 3600
+    DATABASE_POOL_RECYCLE: int = 1800
 
     # API Gateway
     AUTH_SERVICE_URL: str = "http://127.0.0.1:8000"
@@ -42,10 +42,10 @@ class Settings(BaseSettings):
     jwt_public_key_path: str = "certs/ecdsa-public.pem"
 
     # Token Settings
-    access_token_expire_minutes: int = 2  # 2 minutes for testing
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 2  # For compatibility
+    access_token_expire_minutes: int = 1440  # 1 day
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440  # For compatibility
     refresh_token_expire_days: int = 30  # Keep 30-day sessions
-    refresh_token_expire_minutes: Optional[int] = 5  # Added 5 minutes for testing
+    refresh_token_expire_minutes: Optional[int] = 1440  # Added 5 minutes for testing
     refresh_token_grace_period_seconds: int = 60
     jwt_issuer: str = "tradesage-auth-service"
     bcrypt_rounds: int = 12
@@ -67,9 +67,9 @@ class Settings(BaseSettings):
     kafka_bootstrap_servers: Optional[str] = os.environ.get("KAFKA_BOOTSTRAP_SERVERS")
 
     # Service URLs
-    auth_service_url: Optional[str] = os.environ.get("AUTH_SERVICE_URL")
-    user_service_url: Optional[str] = os.environ.get("USER_SERVICE_URL")
-    tenant_service_url: Optional[str] = os.environ.get("TENANT_SERVICE_URL")
+    auth_service_url: Optional[str] = os.environ.get("AUTH_SERVICE_URL", "http://127.0.0.1:8000")
+    user_service_url: Optional[str] = os.environ.get("USER_SERVICE_URL", "http://127.0.0.1:8001")
+    tenant_service_url: Optional[str] = os.environ.get("TENANT_SERVICE_URL", "http://127.0.0.1:8003")
     session_service_url: str = os.environ.get("SESSION_SERVICE_URL", "http://127.0.0.1:8082")
 
     # CORS settings

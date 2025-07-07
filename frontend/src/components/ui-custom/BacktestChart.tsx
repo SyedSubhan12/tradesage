@@ -1,4 +1,3 @@
-
 import React from 'react';
 import {
   ResponsiveContainer,
@@ -212,6 +211,7 @@ export const BacktestChart: React.FC<BacktestChartProps> = ({ height = 400, acti
                 <ReferenceLine 
                   key={`buy-${index}`}
                   x={entry.date} 
+                  yAxisId="price"
                   stroke="#00FF9D"
                   strokeDasharray="3 3"
                   isFront={true}
@@ -222,6 +222,7 @@ export const BacktestChart: React.FC<BacktestChartProps> = ({ height = 400, acti
                 <ReferenceLine 
                   key={`sell-${index}`}
                   x={entry.date} 
+                  yAxisId="price"
                   stroke="#FF4D4D"
                   strokeDasharray="3 3"
                   isFront={true}
@@ -238,6 +239,7 @@ export const BacktestChart: React.FC<BacktestChartProps> = ({ height = 400, acti
                 <ReferenceLine 
                   key={`news-${index}`}
                   x={entry.date} 
+                  yAxisId="price"
                   stroke="#FFD600"
                   isFront={true}
                 />

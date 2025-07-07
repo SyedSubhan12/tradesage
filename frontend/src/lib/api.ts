@@ -3,6 +3,17 @@ import { User, UserRole } from './authContext';
 
 const API_BASE_URL = '/api'; // Use relative URLs to work with Vite proxy
 
+// ---------------------------------------------------------------------------
+// Lightweight conditional logger – noisy/diagnostic output only in development
+// ---------------------------------------------------------------------------
+const isDev = import.meta.env.MODE !== 'production';
+const debugLog = (...args: unknown[]) => {
+  if (isDev) {
+    // eslint-disable-next-line no-console
+    console.debug(...args);
+  }
+};
+
 // Create an axios instance
 const axiosInstance = axios.create({
   baseURL: API_BASE_URL,
@@ -86,7 +97,7 @@ const refreshAccessToken = async (): Promise<TokenResponse> => {
     refreshTokenState.attempts = 0;
     refreshTokenState.lastAttempt = 0;
     
-    debugLog('✅ Token refresh successful');
+    debugLog('  Token refresh successful');
     
     // Store the new access token
     localStorage.setItem('access_token', response.data.access_token);
@@ -98,13 +109,13 @@ const refreshAccessToken = async (): Promise<TokenResponse> => {
       debugLog("🔄 New refresh token received - 30-day renewal cycle activated");
     } else {
       // No new refresh token - continue using existing one
-      debugLog("✅ Using existing refresh token (still valid for current 30-day cycle)");
+      debugLog("  Using existing refresh token (still valid for current 30-day cycle)");
     }
     
     return response.data;
     
   } catch (error) {
-    console.error(`❌ Token refresh failed (attempt ${refreshTokenState.attempts}):`, error);
+    console.error(` Token refresh failed (attempt ${refreshTokenState.attempts}):`, error);
     
     if (refreshTokenState.attempts >= refreshTokenState.maxAttempts) {
       console.error('Max refresh attempts reached. Logging out.');
@@ -210,7 +221,7 @@ axiosInstance.interceptors.response.use(
             debugLog("🔄 New refresh token received - 30-day renewal cycle activated");
           } else {
             // No new refresh token - continue using existing one
-            debugLog("✅ Using existing refresh token (still valid for current 30-day cycle)");
+            debugLog("  Using existing refresh token (still valid for current 30-day cycle)");
           }
           
           debugLog("Token refresh operation completed successfully");
@@ -387,16 +398,16 @@ const startProactiveRefresh = () => {
             debugLog("🔄 New refresh token received - 30-day renewal cycle activated");
           } else {
             // No new refresh token - continue using existing one
-            debugLog("✅ Using existing refresh token (still valid for current 30-day cycle)");
+            debugLog("  Using existing refresh token (still valid for current 30-day cycle)");
           }
           
-          debugLog('✅ Proactive token refresh successful');
+          debugLog('  Proactive token refresh successful');
         } else {
           debugLog('Refresh already in progress. Skipping proactive refresh.');
         }
       }
     } catch (error) {
-      console.error('❌ Proactive refresh failed:', error);
+      console.error(' Proactive refresh failed:', error);
     }
   };
 
@@ -420,15 +431,4 @@ export const cleanupTokenRefresh = () => {
   refreshTokenState.attempts = 0;
   refreshTokenState.lastAttempt = 0;
   stopProactiveRefresh();
-};
-
-// ---------------------------------------------------------------------------
-// Lightweight conditional logger – noisy/diagnostic output only in development
-// ---------------------------------------------------------------------------
-const isDev = import.meta.env.MODE !== 'production';
-const debugLog = (...args: unknown[]) => {
-  if (isDev) {
-    // eslint-disable-next-line no-console
-    console.debug(...args);
-  }
 };

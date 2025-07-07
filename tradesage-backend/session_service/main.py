@@ -41,6 +41,9 @@ async def lifespan(app: FastAPI):
     )
     logger.info("Dependencies for background task created.")
 
+    # Note: Table creation is now handled by Alembic migrations
+    # Run migrations with: alembic upgrade head
+
     async def periodic_cleanup():
         cleanup_interval = getattr(settings, 'session_cleanup_interval_seconds', 3600)
         while True:

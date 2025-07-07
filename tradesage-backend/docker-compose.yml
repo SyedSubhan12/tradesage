@@ -1,0 +1,280 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: tradesage-postgres
+    environment:
+      POSTGRES_DB: tradesage
+      POSTGRES_USER: tradesage
+      POSTGRES_PASSWORD: tradesage
+      POSTGRES_INITDB_ARGS: "-E UTF8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tradesage_user -d tradesage"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - tradesage-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: tradesage-redis
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - tradesage-network
+
+  # API Gateway
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    container_name: tradesage-gateway
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://tradesage_user:tradesage_password@postgres:5432/tradesage
+      REDIS_URL: redis://redis:6379/0
+      AUTH_SERVICE_URL: http://auth-service:8001
+      SESSION_SERVICE_URL: http://session-service:8002
+      TENANT_SERVICE_URL: http://tenant-service:8003
+      TRADING_SERVICE_URL: http://trading-service:8004
+      ENVIRONMENT: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - tradesage-network
+    restart: unless-stopped
+
+  # Auth Service
+  auth-service:
+    build:
+      context: .
+      dockerfile: ./auth_service/Dockerfile
+    container_name: tradesage-auth
+    ports:
+      - "8001:8001"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://tradesage_user:tradesage_password@postgres:5432/tradesage
+      REDIS_URL: redis://redis:6379/0
+      SESSION_SERVICE_URL: http://session-service:8002
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-your-secret-key-change-in-production}
+      JWT_ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 30
+      REFRESH_TOKEN_EXPIRE_DAYS: 30
+      ENVIRONMENT: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - tradesage-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Session Service
+  session-service:
+    build:
+      context: .
+      dockerfile: ./session_service/Dockerfile
+    container_name: tradesage-session
+    ports:
+      - "8002:8002"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://tradesage_user:tradesage_password@postgres:5432/tradesage
+      REDIS_URL: redis://redis:6379/0
+      SESSION_ENCRYPTION_KEY: ${SESSION_ENCRYPTION_KEY:-your-encryption-key-change-in-production}
+      SESSION_TOKEN_EXPIRE_MINUTES: 43200  # 30 days
+      REDIS_SESSION_TTL_SECONDS: 2592000  # 30 days
+      ENVIRONMENT: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - tradesage-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Tenant Service
+  tenant-service:
+    build:
+      context: .
+      dockerfile: ./tenant-service/Dockerfile
+    container_name: tradesage-tenant
+    ports:
+      - "8003:8003"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://tradesage_user:tradesage_password@postgres:5432/tradesage
+      REDIS_URL: redis://redis:6379/0
+      # MA130 Configuration
+      MA130_HOST: ${MA130_HOST:-192.168.1.100}
+      MA130_PORT: 22
+      MA130_USERNAME: tradesage_backup
+      MA130_KEY_PATH: /app/keys/ma130_rsa
+      MA130_BACKUP_PATH: /data/tradesage/backups
+      # AWS S3 (fallback)
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-tradesage-backups}
+      ENVIRONMENT: production
+    volumes:
+      - ./keys:/app/keys:ro  # SSH keys for MA130
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - tradesage-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Trading Service (placeholder)
+  trading-service:
+    build:
+      context: .
+      dockerfile: ./trading-service/Dockerfile
+    container_name: tradesage-trading
+    ports:
+      - "8004:8004"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://tradesage_user:tradesage_password@postgres:5432/tradesage
+      REDIS_URL: redis://redis:6379/0
+      TENANT_SERVICE_URL: http://tenant-service:8003
+      MARKET_DATA_SERVICE_URL: http://market-data-service:8005
+      ENVIRONMENT: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      tenant-service:
+        condition: service_healthy
+    networks:
+      - tradesage-network
+    restart: unless-stopped
+
+  # Market Data Service (placeholder)
+  market-data-service:
+    build:
+      context: .
+      dockerfile: ./market-data-service/Dockerfile
+    container_name: tradesage-market-data
+    ports:
+      - "8005:8005"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://tradesage_user:tradesage_password@postgres:5432/tradesage
+      REDIS_URL: redis://redis:6379/0
+      ENVIRONMENT: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - tradesage-network
+    restart: unless-stopped
+
+  # Analytics Service (placeholder)
+  analytics-service:
+    build:
+      context: .
+      dockerfile: ./analytics-service/Dockerfile
+    container_name: tradesage-analytics
+    ports:
+      - "8006:8006"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://tradesage_user:tradesage_password@postgres:5432/tradesage
+      REDIS_URL: redis://redis:6379/0
+      TENANT_SERVICE_URL: http://tenant-service:8003
+      ENVIRONMENT: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      tenant-service:
+        condition: service_healthy
+    networks:
+      - tradesage-network
+    restart: unless-stopped
+
+  # Monitoring - Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: tradesage-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - tradesage-network
+    restart: unless-stopped
+
+  # Monitoring - Grafana
+  grafana:
+    image: grafana/grafana:latest
+    container_name: tradesage-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      - prometheus
+    networks:
+      - tradesage-network
+    restart: unless-stopped
+
+networks:
+  tradesage-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:

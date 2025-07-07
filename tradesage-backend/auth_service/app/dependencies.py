@@ -156,7 +156,7 @@ def get_request_context(request: Request, user_id: Optional[str] = None) -> Dict
             "user_agent": request.headers.get("user-agent", "unknown"),
             "method": getattr(request, 'method', 'unknown'),
             "url": str(request.url) if hasattr(request, 'url') else "unknown",
-            "user_id": user_id,
+            "user_id": request.user_id,
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
     except Exception as e:

@@ -64,7 +64,7 @@ const DynamicNavbar = () => {
   
   return (
     <nav id="main-navbar" className="fixed top-0 left-0 right-0 z-50 w-full py-4 transition-all duration-300">
-      <div className="container mx-auto px-6 flex items-center justify-between">
+      <div className="container mx-auto px-6 flex items-center justify-between h-16">
         <div className="flex items-center">
           <Link to="/" className="text-xl font-bold text-arctic">TradeSage</Link>
         </div>
@@ -127,12 +127,13 @@ const DynamicNavbar = () => {
           #main-navbar {
             background-color: transparent;
             transition: all 0.3s ease;
+            height: 4rem;
           }
           
           .navbar-sticky {
-            background-color: rgba(15, 23, 42, 0.8) !important;
-            backdrop-filter: blur(8px);
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            background-color: rgba(3, 3, 3, 0.8) !important;
+            backdrop-filter: blur(12px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
             transform: translateY(0);
             transition: transform 0.3s ease;
           }

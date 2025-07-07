@@ -1,0 +1,84 @@
+# MA130 Server Configuration for TradeSage Backup System
+
+ma130:
+  connection:
+    host: "192.168.1.100"  # Replace with your MA130 IP
+    port: 22
+    username: "tradesage_backup"
+    # Option 1: Use password (less secure)
+    # password: "your_secure_password"
+    # Option 2: Use SSH key (recommended)
+    key_path: "/app/keys/ma130_rsa"
+    
+  storage:
+    # Base path for all backups on MA130
+    backup_path: "/data/tradesage/backups"
+    
+    # Directory structure will be:
+    # /data/tradesage/backups/
+    #   ├── 2024/
+    #   │   ├── 01/
+    #   │   │   ├── 15/
+    #   │   │   │   ├── backup_tenant1_20240115_023000_abc123.sql.gz
+    #   │   │   │   └── backup_tenant2_20240115_023005_def456.sql.gz
+    
+    # Storage limits
+    max_storage_gb: 2000  # 2TB allocated for backups
+    warning_threshold_percent: 80
+    
+  backup_policy:
+    # Retention settings
+    retention_days: 30
+    
+    # Backup schedules
+    schedules:
+      daily:
+        enabled: true
+        time: "02:00"  # 2 AM local time
+        retention_days: 7
+        
+      weekly:
+        enabled: true
+        day: "sunday"
+        time: "03:00"
+        retention_days: 30
+        
+      monthly:
+        enabled: true
+        day_of_month: 1
+        time: "04:00"
+        retention_days: 365
+    
+    # Compression settings
+    compression:
+      enabled: true
+      level: 9  # Maximum compression
+      
+  monitoring:
+    # Health checks
+    health_check_interval_minutes: 30
+    
+    # Alerts
+    alerts:
+      disk_usage_threshold: 85
+      backup_failure_threshold: 3
+      notification_email: "ops@tradesage.com"
+      
+  security:
+    # Encryption for backups at rest
+    encryption:
+      enabled: true
+      algorithm: "AES-256"
+      key_file: "/app/keys/backup_encryption.key"
+      
+    # Access control
+    allowed_ips:
+      - "10.0.0.0/24"  # Internal network only
+      
+  disaster_recovery:
+    # Secondary backup location (optional)
+    secondary_backup:
+      enabled: false
+      type: "nfs"  # or "s3"
+      location: "//backup-nas/tradesage"
+      sync_interval_hours: 6 

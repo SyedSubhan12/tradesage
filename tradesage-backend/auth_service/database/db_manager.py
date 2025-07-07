@@ -25,10 +25,10 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://zs:Zunairasubhan@
 # Create async engine
 engine = create_async_engine(
     DATABASE_URL,
-    pool_size=20,
-    max_overflow=30,
+    pool_size=50,
+    max_overflow=50,
     pool_pre_ping=True,
-    pool_recycle=3600,
+    pool_recycle=1800,
     echo=False  # Set to True for SQL debugging
 )
 

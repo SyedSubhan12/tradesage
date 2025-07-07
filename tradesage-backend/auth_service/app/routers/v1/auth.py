@@ -52,7 +52,7 @@ from pydantic import EmailStr
 from auth_service.app.models.password_reset_token_models import PasswordResetToken
 from auth_service.app.models.token_blacklist import TokenBlacklist
 from auth_service.app.clients.session_client import session_service_client
-from auth_service.app.dependencies import get_current_active_user, validate_token_format, check_token_blacklist
+from auth_service.app.dependencies import get_current_active_user, get_current_user_optional, validate_token_format, check_token_blacklist
 from auth_service.app.services.auth_service import validate_session_security, is_token_blacklisted
 from auth_service.app.services.session_cache import cached_session_validation
 
@@ -132,9 +132,14 @@ def get_correlation_id(request: Request) -> str:
 
 def get_request_context(request: Request, user_id: Optional[str] = None) -> Dict[str, Any]:
     """Create standardized request context for logging"""
+    xff = request.headers.get('X-Forwarded-For')
+    if xff:
+        client_ip = xff.split(",")[0].strip()
+    else:
+        client_ip = request.client.host
     return {
         "correlation_id": get_correlation_id(request),
-        "client_ip": request.client.host,
+        "client_ip": client_ip,
         "user_agent": request.headers.get("user-agent", "unknown"),
         "method": request.method,
         "url": str(request.url),
@@ -1577,15 +1582,19 @@ async def confirm_password_reset(
 async def logout(
     request: Request,
     response: Response,
-    current_user: BaseUser = Depends(get_current_active_user),
+    current_user: Optional[BaseUser] = Depends(get_current_user_optional),
     db: AsyncSession = Depends(db_manager.get_session)
 ):
-    request_context = get_request_context(request, str(current_user.id))
+    """
+    Enhanced logout endpoint that handles both authenticated and unauthenticated requests.
+    This allows logout to work even if the access token has expired or is missing.
+    """
+    request_context = get_request_context(request, str(current_user.id) if current_user else None)
     context_logger = logger.bind(**request_context)
     
     async with atomic_session_operation(db) as transaction_db:
         try:
-            context_logger.info("Logout started")
+            context_logger.info("Logout started", authenticated=bool(current_user))
             
             # Extract token from Authorization header
             token = None
@@ -1594,43 +1603,91 @@ async def logout(
                 token = authorization.split(" ")[1]
 
             session_id_to_revoke = None
+            user_id_for_audit = None
+            user_email_for_audit = None
+            
+            # If we have a current user from valid token, use that info
+            if current_user:
+                user_id_for_audit = str(current_user.id)
+                user_email_for_audit = current_user.email
+                context_logger.debug("Authenticated logout for user", user_id=user_id_for_audit)
+            
+            # Try to extract session ID from token (even if expired)
             if token:
                 try:
-                    payload = auth_manager.decode_token(token, is_refresh=False)
-                    session_id_to_revoke = payload.session_id
+                    # Decode without verification to get session ID even from expired tokens
+                    import jwt
+                    from cryptography.hazmat.primitives import serialization
+                    
+                    # Get public key for decoding
+                    if hasattr(auth_manager.public_key, 'public_bytes'):
+                        public_key_pem = auth_manager.public_key.public_bytes(
+                            encoding=serialization.Encoding.PEM,
+                            format=serialization.PublicFormat.SubjectPublicKeyInfo
+                        )
+                        public_key_str = public_key_pem.decode('utf-8')
+                    else:
+                        public_key_str = auth_manager.public_key
+                    
+                    # Decode without verification to extract claims
+                    unverified_payload = jwt.decode(
+                        token,
+                        public_key_str,
+                        algorithms=[settings.jwt_algorithm],
+                        options={"verify_signature": False, "verify_exp": False}
+                    )
+                    
+                    session_id_to_revoke = unverified_payload.get('session_id')
+                    
+                    # If we didn't get user info from authenticated request, try to get from token
+                    if not user_id_for_audit:
+                        user_id_for_audit = unverified_payload.get('user_id') or unverified_payload.get('sub')
+                        user_email_for_audit = unverified_payload.get('email')
+                    
                     context_logger.debug("Session ID extracted from token", session_id=session_id_to_revoke)
-                except TokenExpiredError:
-                    context_logger.warning("Expired token during logout")
+                    
                 except Exception as e:
-                    context_logger.error("Token decode error during logout", error=str(e))
+                    context_logger.warning("Failed to extract session info from token", error=str(e))
 
-            # Revoke session and refresh token
+            # Revoke session and refresh token if we have a session ID
             if session_id_to_revoke:
-                revoke_success = await session_service_client.terminate_session(session_id_to_revoke)
-                if revoke_success:
-                    await delete_refresh_token_securely(session_id_to_revoke)
-                    context_logger.debug("Session and refresh token revoked successfully")
-                    active_sessions.dec()  # Update metrics
-                else:
-                    context_logger.warning("Failed to terminate session during logout")
+                try:
+                    revoke_success = await session_service_client.terminate_session(session_id_to_revoke)
+                    if revoke_success:
+                        await delete_refresh_token_securely(session_id_to_revoke)
+                        context_logger.debug("Session and refresh token revoked successfully")
+                        active_sessions.dec()  # Update metrics
+                    else:
+                        context_logger.warning("Failed to terminate session during logout")
+                except Exception as e:
+                    context_logger.error("Error revoking session", error=str(e))
 
-            # Audit logging
-            await log_audit_event(
-                event_type="user_logout_success",
-                user_id=str(current_user.id),
-                details={
-                    "email": current_user.email,
-                    "session_id_revoked": session_id_to_revoke,
-                    **request_context
-                }
-            )
+            # Audit logging if we have user information
+            if user_id_for_audit:
+                await log_audit_event(
+                    event_type="user_logout_success",
+                    user_id=user_id_for_audit,
+                    details={
+                        "email": user_email_for_audit or "unknown",
+                        "session_id_revoked": session_id_to_revoke,
+                        "authenticated_logout": bool(current_user),
+                        **request_context
+                    }
+                )
+            else:
+                context_logger.info("Anonymous logout completed (no user info available)")
 
-            # Clear refresh token cookie
+            # Always clear refresh token cookie
             response.delete_cookie(key="refresh_token", path="/auth")
             
             auth_requests_total.labels(endpoint='logout', method='POST', status='success').inc()
             
-            context_logger.info("Logout completed successfully")
+            context_logger.info(
+                "Logout completed successfully",
+                authenticated=bool(current_user),
+                session_revoked=bool(session_id_to_revoke)
+            )
+            
             return {"message": "Logged out successfully"}
 
         except Exception as e:
@@ -1642,10 +1699,11 @@ async def logout(
             
             auth_requests_total.labels(endpoint='logout', method='POST', status='error').inc()
             
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Internal server error"
-            )
+            # Even on error, try to clear the cookie
+            response.delete_cookie(key="refresh_token", path="/auth")
+            
+            # Return success anyway - the client should be logged out locally
+            return {"message": "Logged out successfully"}
 
 # =============================================================================
 # USER INFO ENDPOINT

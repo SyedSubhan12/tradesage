@@ -208,6 +208,17 @@ class AuthManager:
             logger.error(f"Token format validation error: {e}")
             return False
 
+    def extract_token_from_header(self, authorization: str) -> Optional[str]:
+        """Extract token from Authorization header."""
+        if not authorization:
+            return None
+        
+        parts = authorization.split()
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            return None
+        
+        return parts[1]
+
     def _decode_token_header(self, token: str) -> Optional[Dict[str, Any]]:
         """
         Safely decode JWT header for debugging purposes.
@@ -616,6 +627,114 @@ class AuthManager:
             logger.error(f"Token refresh failed: {e}")
             return None
 
+    def extract_token_from_header(self, authorization: str) -> Optional[str]:
+        """Extract token from Authorization header."""
+        if not authorization:
+            return None
+        
+        parts = authorization.split()
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            return None
+        
+        return parts[1]
+
+    def create_access_token(
+        self,
+        data: Dict[str, Any],
+        user_id: Optional[str] = None,
+        expires_in: Optional[timedelta] = None,
+        tenant_id: Optional[str] = None,
+        roles: Optional[List[str]] = None,
+        scopes: Optional[List[str]] = None,
+        session_id: Optional[str] = None,
+    ) -> str:
+        """
+        Create a JWT access token with:
+         - Standard claims: exp, iat, nbf, iss, aud, jti
+         - Custom claims: data fields, tenant_id, roles, scopes, session_id.
+        """
+        to_encode = data.copy()
+
+        # Ensure user_id is set either from parameter or data
+        if user_id:
+            to_encode["user_id"] = user_id
+        elif "user_id" not in to_encode or not to_encode["user_id"]:
+            raise ValueError("user_id must be set in token payload")
+
+        # Convert expires_in to timedelta if it's an integer (seconds)
+        if isinstance(expires_in, int):
+            expires_in = timedelta(seconds=expires_in)
+
+        # Use provided expiry; if none, fall back to configured default in settings
+        expire = datetime.now(timezone.utc) + (
+            expires_in if expires_in else timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+        )
+
+        # Get current time once
+        now = datetime.now(timezone.utc)
+
+        # CRITICAL FIX: Convert datetime objects to Unix timestamps (integers)
+        to_encode.update(
+            {
+                "exp": int(expire.timestamp()),  # Convert to int timestamp
+                "iat": int(now.timestamp()),     # Convert to int timestamp  
+                "nbf": int(now.timestamp()),     # Convert to int timestamp
+                "iss": "tradesage-auth-service",
+                "aud": settings.API_GATEWAY_AUDIENCE,  # Use API_GATEWAY_AUDIENCE for consistency
+                "token_type": "access",
+                "ver": "1.0",
+                "jti": str(uuid4()),
+            }
+        )
+
+        if tenant_id:
+            to_encode["tenant_id"] = tenant_id
+        if roles:
+            to_encode["roles"] = roles
+        if scopes:
+            to_encode["scopes"] = scopes
+        if session_id:
+            to_encode["session_id"] = session_id
+
+        try:
+            logger.debug(f"Creating access token for user_id: {to_encode.get('user_id')}")
+            logger.debug(f"Token audience: {settings.API_GATEWAY_AUDIENCE}")
+            logger.debug(f"Token expires at: {expire}")
+            logger.debug(f"Access token payload for debugging: {to_encode}")
+
+            # Convert the private key to PEM format if it's not already
+            if hasattr(self.private_key, 'private_bytes'):
+                private_key_pem = self.private_key.private_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PrivateFormat.PKCS8,
+                    encryption_algorithm=serialization.NoEncryption()
+                )
+                private_key_str = private_key_pem.decode('utf-8')
+                
+                # Encode the JWT with the proper key format
+                encoded_jwt = jwt.encode(
+                    to_encode,
+                    private_key_str,
+                    algorithm=self.algorithm
+                )
+            else:
+                encoded_jwt = jwt.encode(to_encode, self.private_key, algorithm=self.algorithm)
+
+            # Validate the created token immediately
+            if not self._validate_token_format(encoded_jwt):
+                raise ValueError("Created token failed format validation")
+
+            logger.debug(f"Access token created successfully (length: {len(encoded_jwt)})")
+            logger.debug(f"Token starts with: {encoded_jwt[:20]}...")
+
+            return encoded_jwt
+        except JWTError as je:
+            logger.error(f"JWT Error creating access token: {je}")
+            raise
+        except Exception as e:
+            logger.error(f"Failed to create access token: {e}", exc_info=True)
+            raise
+
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Instantiate a single AuthManager for use in your FastAPI app
@@ -665,3 +784,79 @@ async def verify_token(authorization: Optional[str] = Header(None)):
         "user_id": token_data.user_id,
         "tenant_id": token_data.tenant_id,
     }
+
+
+# ────────────────────────────────────────────────────────────────────────────────
+# FastAPI Dependencies for Authentication
+# ────────────────────────────────────────────────────────────────────────────────
+
+from fastapi import Depends, HTTPException, status, Request
+from fastapi.security import HTTPBearer
+import aiohttp
+
+security = HTTPBearer()
+
+async def get_current_user(
+    request: Request,
+    token: str = Depends(security)
+) -> dict:
+    """
+    Get current user from access token by calling auth service.
+    """
+    try:
+        # Extract token from HTTPBearer
+        if hasattr(token, 'credentials'):
+            token_str = token.credentials
+        else:
+            token_str = str(token)
+        
+        # Call auth service to validate token
+        async with aiohttp.ClientSession() as session:
+            auth_url = f"{settings.AUTH_SERVICE_URL}/api/v1/auth/verify-token"
+            headers = {"Authorization": f"Bearer {token_str}"}
+            
+            async with session.get(auth_url, headers=headers) as response:
+                if response.status == 200:
+                    user_data = await response.json()
+                    return user_data
+                elif response.status == 401:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Invalid or expired token",
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Authentication service unavailable"
+                    )
+    except aiohttp.ClientError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication service unavailable"
+        )
+    except Exception as e:
+        logger.error(f"Error validating token: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal authentication error"
+        )
+
+
+async def require_admin(
+    current_user: dict = Depends(get_current_user)
+) -> dict:
+    """
+    Require admin role for access.
+    """
+    user_role = current_user.get("role", "")
+    if isinstance(user_role, dict):
+        user_role = user_role.get("value", "")
+    
+    if user_role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required"
+        )
+    
+    return current_user

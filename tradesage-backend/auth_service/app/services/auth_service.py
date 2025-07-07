@@ -97,7 +97,7 @@ async def cleanup_expired_tokens(db: AsyncSession):
     This is an async generator that yields the number of deleted items for each category.
     '''
     from auth_service.app.models.password_reset_token_models import PasswordResetToken
-    from auth_service.app.models.token_blacklist_models import TokenBlacklist  # Ensure model is imported if needed
+    from auth_service.app.models.token_blacklist import TokenBlacklist  # Ensure model is imported if needed
     try:
         logger.info("Starting cleanup of expired tokens...")
         current_time = datetime.now(timezone.utc)

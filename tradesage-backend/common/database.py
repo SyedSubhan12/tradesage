@@ -36,10 +36,10 @@ class DatabaseManager:
         db_url = database_url or self.database_url
         
         engine_kwargs = {
-            "pool_size": kwargs.get("pool_size", 20),
-            "max_overflow": kwargs.get("max_overflow", 30),
+            "pool_size": kwargs.get("pool_size", 50),
+            "max_overflow": kwargs.get("max_overflow", 50),
             "pool_timeout": kwargs.get("pool_timeout", 30),
-            "pool_recycle": kwargs.get("pool_recycle", 3600),
+            "pool_recycle": kwargs.get("pool_recycle", 1800),
             "pool_pre_ping": True,  # Validates connections before use
             "echo": kwargs.get("echo", False),
         }
@@ -72,9 +72,9 @@ class DatabaseManager:
                 db_url,
                 echo=False,  # Disable in production
                 pool_pre_ping=True,
-                pool_recycle=3600,
-                pool_size=20,
-                max_overflow=30,
+                pool_recycle=1800,
+                pool_size=50,
+                max_overflow=50,
                 pool_timeout=30,
             )
             # Ensure async session factory is created alongside the engine

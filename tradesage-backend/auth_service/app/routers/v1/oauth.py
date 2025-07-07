@@ -252,11 +252,44 @@ async def exchange_google_code_for_token(client: httpx.AsyncClient, code: str) -
 async def get_google_user_info(client: httpx.AsyncClient, access_token: str) -> dict[str, Any]:
     """Fetch Google user info with circuit breaker protection."""
     try:
-        user_info_url = "https://www.googleapis.com/oauth2/v2/userinfo"
+        # Try v3 endpoint first
+        user_info_url = "https://www.googleapis.com/oauth2/v3/userinfo"
         headers = {"Authorization": f"Bearer {access_token}"}
         response = await client.get(user_info_url, headers=headers, timeout=10.0)
         response.raise_for_status()
-        return cast(dict[str, Any], response.json())
+        user_data = cast(dict[str, Any], response.json())
+        
+        # Log the received data for debugging
+        logger.debug(f"Received user data from Google: {user_data}")
+        
+        # Validate required fields
+        required_fields = ['sub', 'email']
+        missing_fields = [field for field in required_fields if field not in user_data]
+        
+        if missing_fields:
+            # If v3 endpoint didn't provide required fields, try v2 as fallback
+            user_info_url = "https://www.googleapis.com/oauth2/v2/userinfo"
+            response = await client.get(user_info_url, headers=headers, timeout=10.0)
+            response.raise_for_status()
+            user_data = cast(dict[str, Any], response.json())
+            
+            # Check again for required fields
+            missing_fields = [field for field in required_fields if field not in user_data]
+            if missing_fields:
+                logger.error(f"Missing required fields in Google user data: {missing_fields}")
+                logger.debug(f"Received user data: {user_data}")
+                raise ValueError(f"Missing required fields from Google: {', '.join(missing_fields)}")
+        
+        # Add additional profile information if available
+        if 'name' not in user_data and ('given_name' in user_data or 'family_name' in user_data):
+            name_parts = []
+            if 'given_name' in user_data:
+                name_parts.append(user_data['given_name'])
+            if 'family_name' in user_data:
+                name_parts.append(user_data['family_name'])
+            user_data['name'] = ' '.join(name_parts)
+            
+        return user_data
     except Exception as e:
         logger.error(f"Failed to fetch Google user info: {str(e)}", exc_info=True)
         raise
@@ -278,14 +311,15 @@ async def login_google():
             detail="OAuth configuration error"
         )
     
-    # Build the Google OAuth URL
+    # Build the Google OAuth URL with required scopes
     params = {
         'client_id': client_id,
         'response_type': 'code',
-        'scope': 'openid email profile',
+        'scope': 'openid email profile https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email',
         'redirect_uri': redirect_uri,
         'access_type': 'offline',  # Request refresh token
         'prompt': 'consent',  # Force consent screen to get refresh token
+        'include_granted_scopes': 'true'  # Include any previously granted scopes
     }
     
     logger.debug(f"Initiating Google OAuth flow with client_id: {client_id}, redirect_uri: {redirect_uri}")
@@ -321,9 +355,11 @@ async def google_callback(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Service temporarily unavailable. Please try again later."
             )
+        except ValueError as e:
+            logger.error(f"Invalid user data from Google: {str(e)}")
             raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Google OAuth service is currently unavailable. Please try again later."
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Received invalid user data from Google. Please try again."
             )
         except httpx.HTTPStatusError as e:
             logger.error(f"HTTP error during Google OAuth flow: {e.response.text}")
@@ -336,6 +372,13 @@ async def google_callback(
             # User processing logic
             # ---------------------
             # Check if user exists by email
+            if 'email' not in user_data:
+                logger.error("No email in Google user data")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Email address is required for registration"
+                )
+                
             user = await get_user_by_username_or_email(db, user_data['email'])
             
             if not user:
@@ -355,6 +398,8 @@ async def google_callback(
                     logger.error(f"Schema creation failed for tenant {tenant.id}: {schema_error}")
                     await db.rollback()
                     raise HTTPException(status_code=500, detail="Failed to create tenant schema")
+                
+                # Get optional user fields with safe defaults
                 user = User(
                     email=user_data['email'],
                     username=user_data['email'].split('@')[0],
@@ -366,7 +411,7 @@ async def google_callback(
                     tenant_id=tenant.id,
                     user_metadata={
                         "auth_provider": "google",
-                        "auth_provider_id": user_data['sub']
+                        "auth_provider_id": user_data['sub']  # We know this exists from validation
                     }
                 )
                 db.add(user)

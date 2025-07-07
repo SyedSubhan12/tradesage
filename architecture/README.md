@@ -96,7 +96,7 @@ async def refresh_access_token(request, response, db):
 
 ## 📊 Architecture Highlights
 
-### ✅ **Strengths**
+###   **Strengths**
 - **Microservices Architecture**: Clean separation of concerns
 - **ES256 JWT Algorithm**: Strong cryptographic security
 - **Dual Storage Strategy**: Redis + PostgreSQL for performance and persistence
@@ -149,4 +149,4 @@ For questions about this documentation or the architecture:
 
 **Last Updated**: December 2024  
 **Document Version**: 1.0  
-**Architecture Review Status**: ✅ Completed 
+**Architecture Review Status**:   Completed 

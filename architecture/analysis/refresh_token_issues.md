@@ -195,9 +195,9 @@ axiosInstance.interceptors.response.use(
 ```
 
 **Analysis**:
-✅ **Good**: Prevents multiple frontend refresh requests  
-❌ **Issue**: Backend doesn't have corresponding protection  
-❌ **Issue**: Multiple browser tabs can still cause race conditions  
+  **Good**: Prevents multiple frontend refresh requests  
+ **Issue**: Backend doesn't have corresponding protection  
+ **Issue**: Multiple browser tabs can still cause race conditions  
 
 ### Backend Race Condition Vulnerability
 

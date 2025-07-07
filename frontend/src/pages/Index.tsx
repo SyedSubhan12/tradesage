@@ -4,10 +4,11 @@ import { motion } from "framer-motion";
 import { Link } from 'react-router-dom';
 import CurrencyParticlesBackground from '@/components/currency-background/CurrencyParticlesBackground';
 import { Button } from '@/components/ui/button';
-import { ArrowRight, Bot, ChevronRight, LineChart, PieChart, Zap } from 'lucide-react';
-import FeatureCard from '@/components/features/FeatureCard';
+import { ArrowRight, Bot, ChevronRight, LineChart, PieChart, Zap, BarChart, Shield } from 'lucide-react';
 import DynamicNavbar from '@/components/layout/DynamicNavbar';
 import { useAuth } from '@/lib/authContext';
+import { HeroGeometric } from '@/components/ui/shape-landing-hero';
+import RadialOrbitalTimeline from '@/components/ui/radial-orbital-timeline';
 
 const Index = () => {
   const { isAuthenticated } = useAuth();
@@ -19,69 +20,20 @@ const Index = () => {
   }, [isAuthenticated]);
   
   return (
-    <div className="relative min-h-screen bg-space-blue overflow-hidden">
-      {/* Background */}
-      <CurrencyParticlesBackground />
-      
+    <div className="relative min-h-screen bg-[#030303] overflow-hidden">
       {/* Dynamic Navigation */}
       <DynamicNavbar />
       
-      {/* Hero Section */}
-      <section className="content-section relative pt-24 min-h-[calc(100vh-80px)] flex flex-col items-center justify-center px-4 z-10 text-center">
-        <div className="mb-6 inline-flex items-center">
-          <div className="bg-plasma-purple/20 backdrop-blur-sm px-4 py-1 rounded-full flex items-center">
-            <span className="bg-plasma-purple text-white text-xs px-2 py-0.5 rounded-full mr-2">New</span>
-            <span className="text-sm text-arctic">Automated Lead Generation</span>
-          </div>
-        </div>
-        
-        <motion.div 
-          className="max-w-4xl text-center"
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.8 }}
-        >
-          <h1 className="text-5xl md:text-7xl font-bold text-arctic mb-6">
-            <span className="block mb-2">Transform Your</span>
-            <span className="block mb-2 neon-gradient">Liquid Futures</span>
-            <span className="block">Trading Experience</span>
-          </h1>
-          <p className="text-xl text-arctic/70 mb-10 max-w-2xl mx-auto">
-            TradeSage brings AI automation to your fingertips & streamline tasks.
-          </p>
-          <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-            <Link to={isAuthenticated ? "/dashboard" : "/auth/signup"}>
-              <Button 
-                className="bg-plasma-purple hover:bg-plasma-purple/90 text-white px-6 py-6 text-lg font-medium rounded-lg flex items-center"
-                size="lg"
-              >
-                Get in touch <ArrowRight className="ml-2 h-4 w-4" />
-              </Button>
-            </Link>
-            <Button 
-              variant="outline"
-              className="border-white/10 hover:bg-white/5 text-arctic"
-              size="lg"
-            >
-              View services
-            </Button>
-          </div>
-        </motion.div>
-
-        {/* Bottom right button */}
-        <div className="absolute bottom-8 right-8">
-          <Link to={isAuthenticated ? "/dashboard" : "/auth/signup"}>
-            <Button 
-              className="bg-plasma-purple hover:bg-plasma-purple/90 text-white rounded-full px-6 flex items-center"
-            >
-              Use For Free <ArrowRight className="ml-2 h-4 w-4" />
-            </Button>
-          </Link>
-        </div>
-      </section>
+      {/* Hero Section with Shapes */}
+      <HeroGeometric 
+        isAuthenticated={isAuthenticated}
+        badge="AI-Powered Trading Platform"
+        title1="Transform Your"
+        title2="Trading Future"
+      />
       
       {/* Features Section */}
-      <section id="features" className="relative z-10 py-20 bg-space-blue/50 backdrop-blur-md">
+      <section id="features" className="relative z-10 py-20 bg-[#030303]/90 backdrop-blur-md overflow-hidden">
         <div className="container mx-auto px-4">
           <div className="text-center mb-16">
             <motion.div
@@ -89,12 +41,15 @@ const Index = () => {
               whileInView={{ opacity: 1 }}
               viewport={{ once: true }}
               transition={{ duration: 0.5 }}
-              className="inline-flex items-center bg-white/5 backdrop-blur-sm border border-white/10 px-4 py-1 rounded-full mb-4"
+              className="inline-flex items-center gap-3 px-4 py-2 rounded-full bg-gradient-to-r from-indigo-500/10 to-rose-500/10 border border-white/20 backdrop-blur-sm shadow-[0_8px_32px_0_rgba(255,255,255,0.1)]"
             >
-              <span className="text-sm text-arctic">Our Powerful Features</span>
+              <div className="h-2.5 w-2.5 rounded-full bg-gradient-to-r from-indigo-400 to-rose-400 animate-pulse shadow-[0_0_10px_rgba(255,255,255,0.3)]" />
+              <span className="text-sm font-medium text-white/90 tracking-wide">
+                Our Powerful Features
+              </span>
             </motion.div>
             <motion.h2 
-              className="text-4xl md:text-5xl font-bold text-arctic mb-4"
+              className="text-4xl md:text-5xl font-bold text-white mb-4"
               initial={{ opacity: 0, y: 20 }}
               whileInView={{ opacity: 1, y: 0 }}
               viewport={{ once: true }}
@@ -103,7 +58,7 @@ const Index = () => {
               AI-powered trading solutions
             </motion.h2>
             <motion.p 
-              className="text-lg text-arctic/70 max-w-2xl mx-auto"
+              className="text-lg text-gray-300 max-w-2xl mx-auto mb-16"
               initial={{ opacity: 0, y: 20 }}
               whileInView={{ opacity: 1, y: 0 }}
               viewport={{ once: true }}
@@ -111,39 +66,87 @@ const Index = () => {
             >
               Experience the future of algorithmic trading with our cutting-edge features designed to optimize your investment strategy.
             </motion.p>
-          </div>
-          
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-            <FeatureCard 
-              icon={<Bot size={40} className="text-plasma-purple" />}
-              title="AI Market Analysis"
-              description="Our AI analyzes market trends and news in real-time to provide actionable insights for your trading decisions."
+
+            <RadialOrbitalTimeline
+              timelineData={[
+                {
+                  id: 1,
+                  title: "AI Market Analysis",
+                  date: "2024 Q1",
+                  content: "Our AI analyzes market trends and news in real-time to provide actionable insights for your trading decisions.",
+                  category: "AI",
+                  icon: Bot,
+                  relatedIds: [2, 5],
+                  status: "completed",
+                  energy: 90
+                },
+                {
+                  id: 2,
+                  title: "Algorithmic Trading",
+                  date: "2024 Q1",
+                  content: "Create and deploy custom trading strategies with our intuitive strategy builder and backtesting tools.",
+                  category: "Trading",
+                  icon: LineChart,
+                  relatedIds: [1, 3],
+                  status: "completed",
+                  energy: 85
+                },
+                {
+                  id: 3,
+                  title: "Portfolio Optimization",
+                  date: "2024 Q2",
+                  content: "Automatically balance your portfolio based on risk tolerance and market conditions for optimal performance.",
+                  category: "Portfolio",
+                  icon: PieChart,
+                  relatedIds: [2, 4],
+                  status: "in-progress",
+                  energy: 75
+                },
+                {
+                  id: 4,
+                  title: "Real-time Analytics",
+                  date: "2024 Q2",
+                  content: "Track your positions, market movements, and strategy performance with advanced real-time analytics.",
+                  category: "Analytics",
+                  icon: BarChart,
+                  relatedIds: [3, 5],
+                  status: "in-progress",
+                  energy: 60
+                },
+                {
+                  id: 5,
+                  title: "Risk Management",
+                  date: "2024 Q3",
+                  content: "Advanced risk controls and position sizing algorithms to protect your capital and maximize returns.",
+                  category: "Risk",
+                  icon: Shield,
+                  relatedIds: [1, 4],
+                  status: "pending",
+                  energy: 40
+                }
+              ]}
             />
-            <FeatureCard 
-              icon={<LineChart size={40} className="text-electric-cyan" />}
-              title="Algorithmic Trading"
-              description="Create and deploy custom trading strategies with our intuitive strategy builder and backtesting tools."
-            />
-            <FeatureCard 
-              icon={<PieChart size={40} className="text-neon-green" />}
-              title="Portfolio Optimization"
-              description="Automatically balance your portfolio based on risk tolerance and market conditions for optimal performance."
-            />
-          </div>
-          
-          <div className="mt-16 text-center">
+
+            <motion.div 
+              initial={{ opacity: 0, y: 20 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true }}
+              transition={{ duration: 0.5, delay: 0.4 }}
+              className="mt-16"
+            >
             <Button 
               variant="outline" 
-              className="border-white/10 hover:bg-white/5 text-arctic"
+                className="border-white/20 bg-white/5 backdrop-blur-sm hover:bg-white/10 text-white"
             >
               Explore All Features <ChevronRight className="ml-2 h-4 w-4" />
             </Button>
+            </motion.div>
           </div>
         </div>
       </section>
       
       {/* How It Works */}
-      <section className="relative z-10 py-20 bg-space-blue/80 backdrop-blur-md">
+      <section className="relative z-10 py-20 bg-[#0a0a0a]/90 backdrop-blur-md overflow-hidden">
         <div className="container mx-auto px-4">
           <div className="text-center mb-16">
             <motion.div
@@ -153,10 +156,10 @@ const Index = () => {
               transition={{ duration: 0.5 }}
               className="inline-flex items-center bg-white/5 backdrop-blur-sm border border-white/10 px-4 py-1 rounded-full mb-4"
             >
-              <span className="text-sm text-arctic">Simple Process</span>
+              <span className="text-sm text-white">Simple Process</span>
             </motion.div>
             <motion.h2 
-              className="text-4xl md:text-5xl font-bold text-arctic mb-4"
+              className="text-4xl md:text-5xl font-bold text-white mb-4"
               initial={{ opacity: 0, y: 20 }}
               whileInView={{ opacity: 1, y: 0 }}
               viewport={{ once: true }}
@@ -165,7 +168,7 @@ const Index = () => {
               How TradeSage Works
             </motion.h2>
             <motion.p 
-              className="text-lg text-arctic/70 max-w-2xl mx-auto"
+              className="text-lg text-gray-300 max-w-2xl mx-auto"
               initial={{ opacity: 0, y: 20 }}
               whileInView={{ opacity: 1, y: 0 }}
               viewport={{ once: true }}
@@ -179,19 +182,19 @@ const Index = () => {
             {[1, 2, 3].map((step) => (
               <motion.div 
                 key={step}
-                className="glass-panel p-8 rounded-xl relative"
+                className="bg-white/5 backdrop-blur-sm border border-white/10 p-8 rounded-xl relative"
                 initial={{ opacity: 0, y: 20 }}
                 whileInView={{ opacity: 1, y: 0 }}
                 viewport={{ once: true }}
                 transition={{ duration: 0.5, delay: step * 0.2 }}
               >
-                <div className="absolute -top-4 -left-4 h-12 w-12 rounded-full bg-plasma-purple flex items-center justify-center text-xl font-bold text-white">
+                <div className="absolute -top-4 -left-4 h-12 w-12 rounded-full bg-gradient-to-r from-purple-500 to-pink-500 flex items-center justify-center text-xl font-bold text-white">
                   {step}
                 </div>
-                <h3 className="text-2xl font-bold text-arctic mb-4 mt-4">
+                <h3 className="text-2xl font-bold text-white mb-4 mt-4">
                   {step === 1 ? "Create Account" : step === 2 ? "Set Preferences" : "Start Trading"}
                 </h3>
-                <p className="text-arctic/70">
+                <p className="text-gray-300">
                   {step === 1 
                     ? "Sign up in minutes and connect your trading accounts securely." 
                     : step === 2 
@@ -205,7 +208,7 @@ const Index = () => {
       </section>
       
       {/* Pricing Section */}
-      <section id="pricing" className="relative z-10 py-20 bg-space-blue/50 backdrop-blur-md">
+      <section id="pricing" className="relative z-10 py-20 bg-[#030303]/90 backdrop-blur-md overflow-hidden">
         <div className="container mx-auto px-4">
           <div className="text-center mb-16">
             <motion.div
@@ -215,10 +218,10 @@ const Index = () => {
               transition={{ duration: 0.5 }}
               className="inline-flex items-center bg-white/5 backdrop-blur-sm border border-white/10 px-4 py-1 rounded-full mb-4"
             >
-              <span className="text-sm text-arctic">Pricing Plans</span>
+              <span className="text-sm text-white">Pricing Plans</span>
             </motion.div>
             <motion.h2 
-              className="text-4xl md:text-5xl font-bold text-arctic mb-4"
+              className="text-4xl md:text-5xl font-bold text-white mb-4"
               initial={{ opacity: 0, y: 20 }}
               whileInView={{ opacity: 1, y: 0 }}
               viewport={{ once: true }}
@@ -227,7 +230,7 @@ const Index = () => {
               Choose Your Plan
             </motion.h2>
             <motion.p 
-              className="text-lg text-arctic/70 max-w-2xl mx-auto"
+              className="text-lg text-gray-300 max-w-2xl mx-auto"
               initial={{ opacity: 0, y: 20 }}
               whileInView={{ opacity: 1, y: 0 }}
               viewport={{ once: true }}
@@ -278,37 +281,37 @@ const Index = () => {
             ].map((plan, index) => (
               <motion.div 
                 key={plan.name}
-                className={`glass-panel rounded-xl overflow-hidden ${plan.popular ? 'border-2 border-plasma-purple' : 'border border-white/10'}`}
+                className={`bg-white/5 backdrop-blur-sm rounded-xl overflow-hidden ${plan.popular ? 'border-2 border-purple-500' : 'border border-white/10'}`}
                 initial={{ opacity: 0, y: 20 }}
                 whileInView={{ opacity: 1, y: 0 }}
                 viewport={{ once: true }}
                 transition={{ duration: 0.5, delay: index * 0.2 }}
               >
                 {plan.popular && (
-                  <div className="bg-plasma-purple text-white text-center py-2 text-sm font-medium">
+                  <div className="bg-gradient-to-r from-purple-500 to-pink-500 text-white text-center py-2 text-sm font-medium">
                     Most Popular
                   </div>
                 )}
                 <div className="p-8">
-                  <h3 className="text-2xl font-bold text-arctic mb-2">{plan.name}</h3>
+                  <h3 className="text-2xl font-bold text-white mb-2">{plan.name}</h3>
                   <div className="flex items-end mb-4">
-                    <span className="text-4xl font-bold text-arctic">{plan.price}</span>
-                    {plan.price !== "Custom" && <span className="text-arctic/70 ml-1">/month</span>}
+                    <span className="text-4xl font-bold text-white">{plan.price}</span>
+                    {plan.price !== "Custom" && <span className="text-gray-300 ml-1">/month</span>}
                   </div>
-                  <p className="text-arctic/70 mb-6">{plan.description}</p>
+                  <p className="text-gray-300 mb-6">{plan.description}</p>
                   
                   <ul className="space-y-3 mb-8">
                     {plan.features.map((feature) => (
                       <li key={feature} className="flex items-center">
-                        <Zap size={16} className="text-neon-green mr-2" />
-                        <span className="text-arctic/90">{feature}</span>
+                        <Zap size={16} className="text-purple-400 mr-2" />
+                        <span className="text-gray-200">{feature}</span>
                       </li>
                     ))}
                   </ul>
                   
                   <Link to={isAuthenticated ? "/dashboard" : "/auth/signup"}>
                     <Button 
-                      className={plan.popular ? "bg-plasma-purple hover:bg-plasma-purple/90 w-full" : "bg-white/10 hover:bg-white/20 text-arctic w-full"}
+                      className={plan.popular ? "bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 w-full" : "bg-white/10 hover:bg-white/20 text-white w-full"}
                     >
                       Get Started
                     </Button>
@@ -321,35 +324,35 @@ const Index = () => {
       </section>
       
       {/* CTA Section */}
-      <section className="relative z-10 py-20 bg-space-blue/80 backdrop-blur-md">
+      <section className="relative z-10 py-20 bg-[#0a0a0a]/90 backdrop-blur-md overflow-hidden">
         <div className="container mx-auto px-4">
           <motion.div 
-            className="glass-panel rounded-2xl p-10 max-w-5xl mx-auto bg-gradient-to-br from-space-blue to-black border border-white/10 relative overflow-hidden"
+            className="bg-gradient-to-br from-purple-900/50 to-pink-900/50 backdrop-blur-sm rounded-2xl p-10 max-w-5xl mx-auto border border-white/10 relative overflow-hidden"
             initial={{ opacity: 0 }}
             whileInView={{ opacity: 1 }}
             viewport={{ once: true }}
             transition={{ duration: 0.8 }}
           >
             {/* Purple glow */}
-            <div className="absolute top-0 right-0 w-64 h-64 rounded-full bg-plasma-purple/30 blur-[100px]" />
+            <div className="absolute top-0 right-0 w-64 h-64 rounded-full bg-purple-500/30 blur-[100px]" />
             
             <div className="relative z-10 flex flex-col md:flex-row items-center justify-between gap-8">
               <div className="md:max-w-xl">
-                <h2 className="text-3xl md:text-4xl font-bold text-arctic mb-4">
+                <h2 className="text-3xl md:text-4xl font-bold text-white mb-4">
                   Ready to transform your trading strategy?
                 </h2>
-                <p className="text-lg text-arctic/70 mb-6">
+                <p className="text-lg text-gray-300 mb-6">
                   Join thousands of traders who use TradeSage to gain a competitive edge in the markets.
                 </p>
               </div>
               
               <div className="flex flex-col gap-4 w-full md:w-auto">
                 <Link to={isAuthenticated ? "/dashboard" : "/auth/signup"}>
-                  <Button className="bg-plasma-purple hover:bg-plasma-purple/90 text-white px-8 py-6 text-lg rounded-lg">
+                  <Button className="bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white px-8 py-6 text-lg rounded-lg">
                     Start For Free
                   </Button>
                 </Link>
-                <Button variant="outline" className="border-white/10 hover:bg-white/5 text-arctic">
+                <Button variant="outline" className="border-white/10 hover:bg-white/5 text-white">
                   Book a Demo
                 </Button>
               </div>
@@ -359,60 +362,60 @@ const Index = () => {
       </section>
       
       {/* Footer */}
-      <footer className="relative z-10 py-12 bg-space-blue/90 backdrop-blur-md">
+      <footer className="relative z-10 py-12 bg-[#030303] backdrop-blur-md">
         <div className="container mx-auto px-4">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-8 mb-8">
             <div>
-              <h3 className="text-xl font-bold text-arctic mb-4">TradeSage</h3>
-              <p className="text-arctic/70 mb-4">
+              <h3 className="text-xl font-bold text-white mb-4">TradeSage</h3>
+              <p className="text-gray-400 mb-4">
                 AI-powered trading platform for modern investors.
               </p>
             </div>
             
             <div>
-              <h4 className="text-sm font-semibold uppercase tracking-wider text-arctic/50 mb-4">Product</h4>
+              <h4 className="text-sm font-semibold uppercase tracking-wider text-gray-500 mb-4">Product</h4>
               <ul className="space-y-2">
-                <li><a href="#" className="text-arctic/70 hover:text-arctic">Features</a></li>
-                <li><a href="#" className="text-arctic/70 hover:text-arctic">Pricing</a></li>
-                <li><a href="#" className="text-arctic/70 hover:text-arctic">API</a></li>
-                <li><a href="#" className="text-arctic/70 hover:text-arctic">Integrations</a></li>
+                <li><a href="#" className="text-gray-400 hover:text-white">Features</a></li>
+                <li><a href="#" className="text-gray-400 hover:text-white">Pricing</a></li>
+                <li><a href="#" className="text-gray-400 hover:text-white">API</a></li>
+                <li><a href="#" className="text-gray-400 hover:text-white">Integrations</a></li>
               </ul>
             </div>
             
             <div>
-              <h4 className="text-sm font-semibold uppercase tracking-wider text-arctic/50 mb-4">Resources</h4>
+              <h4 className="text-sm font-semibold uppercase tracking-wider text-gray-500 mb-4">Resources</h4>
               <ul className="space-y-2">
-                <li><a href="#" className="text-arctic/70 hover:text-arctic">Documentation</a></li>
-                <li><a href="#" className="text-arctic/70 hover:text-arctic">Blog</a></li>
-                <li><a href="#" className="text-arctic/70 hover:text-arctic">Tutorials</a></li>
-                <li><a href="#" className="text-arctic/70 hover:text-arctic">Support</a></li>
+                <li><a href="#" className="text-gray-400 hover:text-white">Documentation</a></li>
+                <li><a href="#" className="text-gray-400 hover:text-white">Blog</a></li>
+                <li><a href="#" className="text-gray-400 hover:text-white">Tutorials</a></li>
+                <li><a href="#" className="text-gray-400 hover:text-white">Support</a></li>
               </ul>
             </div>
             
             <div>
-              <h4 className="text-sm font-semibold uppercase tracking-wider text-arctic/50 mb-4">Company</h4>
+              <h4 className="text-sm font-semibold uppercase tracking-wider text-gray-500 mb-4">Company</h4>
               <ul className="space-y-2">
-                <li><a href="#" className="text-arctic/70 hover:text-arctic">About</a></li>
-                <li><a href="#" className="text-arctic/70 hover:text-arctic">Careers</a></li>
-                <li><a href="#" className="text-arctic/70 hover:text-arctic">Contact</a></li>
-                <li><a href="#" className="text-arctic/70 hover:text-arctic">Legal</a></li>
+                <li><a href="#" className="text-gray-400 hover:text-white">About</a></li>
+                <li><a href="#" className="text-gray-400 hover:text-white">Careers</a></li>
+                <li><a href="#" className="text-gray-400 hover:text-white">Contact</a></li>
+                <li><a href="#" className="text-gray-400 hover:text-white">Legal</a></li>
               </ul>
             </div>
           </div>
           
           <div className="border-t border-white/10 pt-8 mt-8 flex flex-col md:flex-row justify-between items-center">
-            <p className="text-arctic/50 text-sm">
+            <p className="text-gray-500 text-sm">
               © {new Date().getFullYear()} TradeSage. All rights reserved.
             </p>
             
             <div className="flex space-x-6 mt-4 md:mt-0">
-              <a href="#" className="text-arctic/50 hover:text-arctic">
+              <a href="#" className="text-gray-500 hover:text-white">
                 Twitter
               </a>
-              <a href="#" className="text-arctic/50 hover:text-arctic">
+              <a href="#" className="text-gray-500 hover:text-white">
                 LinkedIn
               </a>
-              <a href="#" className="text-arctic/50 hover:text-arctic">
+              <a href="#" className="text-gray-500 hover:text-white">
                 GitHub
               </a>
             </div>
