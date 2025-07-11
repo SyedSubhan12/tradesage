@@ -170,7 +170,7 @@ class TenantMonitoringService:
             AND state != 'idle'
         """)
         
-        conn_result = await session.execute(conn_query, {"schema_name": schema_name})
+        conn_result = session.execute(conn_query, {"schema_name": schema_name})
         conn_data = conn_result.first()
         
         # Get cache hit ratio

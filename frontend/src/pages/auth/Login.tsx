@@ -133,7 +133,7 @@ const Login = () => {
                   checked={rememberMe}
                   onCheckedChange={(checked) => setRememberMe(Boolean(checked))}
                   disabled={isLoading}
-                  className="border-white/20 data-[state=checked]:bg-plasma-purple data-[state=checked]:border-plasma-purple"
+                  className="border-white/20 data-[state=checked]:bg-black data-[state=checked]:border-black"
                 />
                 <label htmlFor="remember" className="text-sm font-medium text-gray-300">
                   Remember for 30 days

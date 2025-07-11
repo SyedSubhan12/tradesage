@@ -68,6 +68,7 @@ async def lifespan(app: FastAPI):
         logger.info("Cleanup task successfully cancelled.")
     
     await redis_client.close()
+    await asyncio.sleep(0.1) # Give a small delay for any lingering connections to close
     await db_manager.engine.dispose()
     logger.info("Connections closed.")
 

@@ -16,6 +16,7 @@ import traceback
 import time
 import redis
 
+
 from common.config import settings
 from common.database import db_manager
 from common.redis_client import redis_manager
@@ -55,7 +56,7 @@ async def lifespan(app: FastAPI):
     
     # Initialize database
     logger.info("📊 Initializing database manager")
-    logger.info("Database URL", url=str(settings.database_url).replace(settings.database_password, "..."))
+    logger.info("Database URL", url=str(settings.database_url))
     
     # Initialize DB connection
     _ = db_manager.engine
@@ -75,7 +76,7 @@ async def lifespan(app: FastAPI):
     
     # Test Redis connection
     try:
-        await redis_client.ping()
+        redis_client.ping()
         logger.info("  Redis ping test successful")
     except redis.ConnectionError as e:
         logger.error("Redis connection failed", error=str(e))
@@ -87,10 +88,20 @@ async def lifespan(app: FastAPI):
     
     # Start background tasks
     logger.info("🔄 Starting background tasks")
-    monitoring_task = asyncio.create_task(start_monitoring())
-    backup_task = asyncio.create_task(start_backup_cycle())
+    monitoring_service = TenantMonitoringService(db_manager.get_session, redis_client)
+    # from tenant_service.app.models.tenant import TenantSchema
+
+    # db = db_manager.get_session()
+    # try:
+    #     tenants = db.query(TenantSchema).all()
+    #     for tenant in tenants:
+    #         logger.info(f"Starting monitoring for tenant {tenant.id}")
+    #         asyncio.create_task(monitoring_service.collect_tenant_metrics(tenant.id, tenant.schema_name))
+    # finally:
+    #     db.close()
+    # backup_task = asyncio.create_task(start_backup_cycle())
     logger.info("  Monitoring task started")
-    logger.info("  Backup task started")
+    logger.info("  Backup task will be setup")
     
     # Service startup complete
     logger.info("🎉 Tenant Service started successfully", startup_time_seconds=0.19)
@@ -103,19 +114,19 @@ async def lifespan(app: FastAPI):
     
     # Start monitoring
     logger.info("📊 Starting periodic monitoring task")
-    logger.info("💾 Starting periodic backup task")
-    logger.info("Using MA130 backup service")
-    logger.info("💾 Starting backup cycle", cycle=1)
+    # logger.info("💾 Starting periodic backup task")
+    # logger.info("Using MA130 backup service")
+    # logger.info("💾 Starting backup cycle", cycle=1)
     
     yield
     
     # Shutdown
     logger.info("Service shutting down...")
     monitoring_task.cancel()
-    backup_task.cancel()
+    # backup_task.cancel()
     try:
         await monitoring_task
-        await backup_task
+        # await backup_task
     except asyncio.CancelledError:
         pass
     
@@ -181,85 +192,85 @@ async def periodic_monitoring():
                         traceback=traceback.format_exc())
 
 
-async def periodic_backup():
-    """Create automated backups for tenants with enhanced logging."""
-    logger.info("💾 Starting periodic backup task")
+# # async def periodic_backup():
+# #     """Create automated backups for tenants with enhanced logging."""
+# #     logger.info("💾 Starting periodic backup task")
     
-    # Use MA130 if enabled, otherwise fall back to S3
-    if os.getenv('ENABLE_MA130_BACKUP', 'true').lower() == 'true':
-        logger.info("Using MA130 backup service")
-        backup_service = MA130BackupService(
-            db_config={'dsn': settings.database_url},
-            ma130_config={
-                'host': os.getenv('MA130_HOST', '192.168.1.100'),
-                'port': int(os.getenv('MA130_PORT', '22')),
-                'username': os.getenv('MA130_USERNAME', 'tradesage_backup'),
-                'key_path': os.getenv('MA130_KEY_PATH', '/app/keys/ma130_rsa'),
-                'backup_path': os.getenv('MA130_BACKUP_PATH', '/data/tradesage/backups')
-            }
-        )
-    else:
-        logger.info("Using S3 backup service")
-        backup_service = TenantBackupService(
-            db_config={'dsn': settings.database_url},
-            s3_config={
-                'bucket': settings.BACKUP_S3_BUCKET,
-                'region_name': settings.AWS_REGION
-            }
-        )
+# #     # Use MA130 if enabled, otherwise fall back to S3
+# #     if os.getenv('ENABLE_MA130_BACKUP', 'true').lower() == 'true':
+#         logger.info("Using MA130 backup service")
+#         backup_service = MA130BackupService(
+#             db_config={'dsn': settings.database_url},
+#             ma130_config={
+#                 'host': os.getenv('MA130_HOST', '192.168.1.100'),
+#                 'port': int(os.getenv('MA130_PORT', '22')),
+#                 'username': os.getenv('MA130_USERNAME', 'tradesage_backup'),
+#                 'key_path': os.getenv('MA130_KEY_PATH', '/app/keys/ma130_rsa'),
+#                 'backup_path': os.getenv('MA130_BACKUP_PATH', '/data/tradesage/backups')
+#             }
+#         )
+#     else:
+#         logger.info("Using S3 backup service")
+#         backup_service = TenantBackupService(
+#             db_config={'dsn': settings.database_url},
+#             s3_config={
+#                 'bucket': settings.BACKUP_S3_BUCKET,
+#                 'region_name': settings.AWS_REGION
+#             }
+#         )
     
-    cycle_count = 0
-    while True:
-        try:
-            cycle_count += 1
-            logger.info("💾 Starting backup cycle", cycle=cycle_count)
-            await asyncio.sleep(86400)  # Daily
+#     cycle_count = 0
+#     while True:
+#         try:
+#             cycle_count += 1
+#             logger.info("💾 Starting backup cycle", cycle=cycle_count)
+#             await asyncio.sleep(86400)  # Daily
             
-            # Get tenants needing backup
-            async for db in db_manager.get_session():
-                logger.info("Querying tenants needing backup")
-                result = await db.execute(text("""
-                    SELECT t.id, ts.schema_name 
-                    FROM tenants t
-                    JOIN tenant_schemas ts ON t.id = ts.tenant_id
-                    WHERE t.status = 'active' 
-                    AND ts.is_active = true
-                    AND NOT EXISTS (
-                        SELECT 1 FROM tenant_backups tb
-                        WHERE tb.tenant_id = t.id
-                        AND tb.created_at > NOW() - INTERVAL '24 hours'
-                        AND tb.backup_type = 'scheduled'
-                    )
-                """))
-                tenants = result.fetchall()
-                logger.info("Found tenants needing backup", count=len(tenants))
-                break
+#             # Get tenants needing backup
+#             async for db in db_manager.get_session():
+#                 logger.info("Querying tenants needing backup")
+#                 result = await db.execute(text("""
+#                     SELECT t.id, ts.schema_name 
+#                     FROM tenants t
+#                     JOIN tenant_schemas ts ON t.id = ts.tenant_id
+#                     WHERE t.status = 'active' 
+#                     AND ts.is_active = true
+#                     AND NOT EXISTS (
+#                         SELECT 1 FROM tenant_backups tb
+#                         WHERE tb.tenant_id = t.id
+#                         AND tb.created_at > NOW() - INTERVAL '24 hours'
+#                         AND tb.backup_type = 'scheduled'
+#                     )
+#                 """))
+#                 tenants = result.fetchall()
+#                 logger.info("Found tenants needing backup", count=len(tenants))
+#                 break
                 
-                for tenant_id, schema_name in tenants:
-                    try:
-                        logger.info("Starting backup for tenant",
-                                  tenant_id=str(tenant_id),
-                                  schema_name=schema_name)
-                        await backup_service.create_tenant_backup(
-                            str(tenant_id),
-                            schema_name,
-                            backup_type='scheduled'
-                        )
-                        logger.info("  Scheduled backup completed",
-                                  tenant_id=str(tenant_id))
-                    except Exception as e:
-                        logger.error(" Backup failed",
-                                   tenant_id=str(tenant_id),
-                                   error=str(e),
-                                   traceback=traceback.format_exc())
+#                 for tenant_id, schema_name in tenants:
+#                     try:
+#                         logger.info("Starting backup for tenant",
+#                                   tenant_id=str(tenant_id),
+#                                   schema_name=schema_name)
+#                         await backup_service.create_tenant_backup(
+#                             str(tenant_id),
+#                             schema_name,
+#                             backup_type='scheduled'
+#                         )
+#                         logger.info("  Scheduled backup completed",
+#                                   tenant_id=str(tenant_id))
+#                     except Exception as e:
+#                         logger.error(" Backup failed",
+#                                    tenant_id=str(tenant_id),
+#                                    error=str(e),
+#                                    traceback=traceback.format_exc())
             
-            logger.info("  Backup cycle completed", cycle=cycle_count)
+#             logger.info("  Backup cycle completed", cycle=cycle_count)
             
-        except Exception as e:
-            logger.error(" Backup task error",
-                        cycle=cycle_count, 
-                        error=str(e),
-                        traceback=traceback.format_exc())
+#         except Exception as e:
+#             logger.error(" Backup task error",
+#                         cycle=cycle_count, 
+#                         error=str(e),
+#                         traceback=traceback.format_exc())
 
 
 # ================================
@@ -312,7 +323,7 @@ app.include_router(
 async def health_check(response: Response):
     """Comprehensive health check for tenant service with detailed logging."""
     check_start = time.time()
-    logger.info("🏥 Starting health check")
+    logger.info(" Starting health check")
     
     health_status = {
         "status": "healthy",

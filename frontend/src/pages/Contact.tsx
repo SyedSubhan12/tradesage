@@ -2,7 +2,6 @@ import React from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
-import CurrencyParticlesBackground from '@/components/currency-background/CurrencyParticlesBackground';
 import DynamicNavbar from '@/components/layout/DynamicNavbar';
 
 const Contact = () => {
@@ -14,9 +13,6 @@ const Contact = () => {
 
   return (
     <div className="relative min-h-screen bg-space-blue overflow-hidden">
-      {/* Background */}
-      <CurrencyParticlesBackground />
-      
       {/* Navigation */}
       <DynamicNavbar />
       

@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     DATABASE_MAX_OVERFLOW: int = 50
     DATABASE_POOL_TIMEOUT: int = 30
     DATABASE_POOL_RECYCLE: int = 1800
+   
 
     # API Gateway
     AUTH_SERVICE_URL: str = "http://127.0.0.1:8000"
@@ -71,7 +72,8 @@ class Settings(BaseSettings):
     user_service_url: Optional[str] = os.environ.get("USER_SERVICE_URL", "http://127.0.0.1:8001")
     tenant_service_url: Optional[str] = os.environ.get("TENANT_SERVICE_URL", "http://127.0.0.1:8003")
     session_service_url: str = os.environ.get("SESSION_SERVICE_URL", "http://127.0.0.1:8082")
-
+    api_gateway_url: str = os.environ.get("API_GATEWAY_URL", "http://127.0.0.1:8081")
+    
     # CORS settings
     cors_origins: List[str] = [
         "http://localhost:8080",

@@ -2,6 +2,7 @@
 
 import sys
 import os
+import asyncio
 
 # add root directory to path for common module imports
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -100,6 +101,7 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.error("Error disconnecting Redis")
         try:
+            await asyncio.sleep(0.1) # Give a small delay for any lingering connections to close
             await db_manager.close()
             logger.info("Database connection closed")
         except Exception:
@@ -254,16 +256,7 @@ for route in app.routes:
 # ================================
 # SHUTDOWN EVENT HANDLER
 # ================================
-@app.on_event("shutdown")
-async def shutdown_event():
-    """
-    Properly close the database connection when the application shuts down.
-    """
-    try:
-        await db_manager.close()
-        print("Database connection closed successfully")
-    except Exception as e:
-        print(f"Error closing database connection: {e}")
+
 
 
 
