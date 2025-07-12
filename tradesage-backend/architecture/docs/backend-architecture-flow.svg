@@ -1,0 +1,291 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="1000" viewBox="0 0 1400 1000">
+  <defs>
+    <!-- Define gradients -->
+    <linearGradient id="gatewayGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4F46E5;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#7C3AED;stop-opacity:1" />
+    </linearGradient>
+    
+    <linearGradient id="authGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#10B981;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#059669;stop-opacity:1" />
+    </linearGradient>
+    
+    <linearGradient id="tenantGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#F59E0B;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#D97706;stop-opacity:1" />
+    </linearGradient>
+    
+    <linearGradient id="dbGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#3B82F6;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#1D4ED8;stop-opacity:1" />
+    </linearGradient>
+    
+    <!-- Arrow marker -->
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#6B7280" />
+    </marker>
+    
+    <!-- Filters -->
+    <filter id="shadow" x="-50%" y="-50%" width="200%" height="200%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-opacity="0.15"/>
+    </filter>
+  </defs>
+  
+  <!-- Background -->
+  <rect width="1400" height="1000" fill="#F9FAFB"/>
+  
+  <!-- Title -->
+  <text x="700" y="40" font-family="Arial, sans-serif" font-size="28" font-weight="bold" text-anchor="middle" fill="#111827">
+    TradeSage Backend Architecture
+  </text>
+  
+  <!-- Client Layer -->
+  <g id="client-layer">
+    <rect x="50" y="80" width="200" height="80" rx="8" fill="#E5E7EB" stroke="#9CA3AF" stroke-width="2"/>
+    <text x="150" y="110" font-family="Arial, sans-serif" font-size="16" font-weight="bold" text-anchor="middle" fill="#374151">
+      React Client
+    </text>
+    <text x="150" y="135" font-family="Arial, sans-serif" font-size="14" text-anchor="middle" fill="#6B7280">
+      (Frontend)
+    </text>
+  </g>
+  
+  <g id="mobile-client">
+    <rect x="300" y="80" width="200" height="80" rx="8" fill="#E5E7EB" stroke="#9CA3AF" stroke-width="2"/>
+    <text x="400" y="110" font-family="Arial, sans-serif" font-size="16" font-weight="bold" text-anchor="middle" fill="#374151">
+      Mobile App
+    </text>
+    <text x="400" y="135" font-family="Arial, sans-serif" font-size="14" text-anchor="middle" fill="#6B7280">
+      (iOS/Android)
+    </text>
+  </g>
+  
+  <g id="api-client">
+    <rect x="550" y="80" width="200" height="80" rx="8" fill="#E5E7EB" stroke="#9CA3AF" stroke-width="2"/>
+    <text x="650" y="110" font-family="Arial, sans-serif" font-size="16" font-weight="bold" text-anchor="middle" fill="#374151">
+      API Clients
+    </text>
+    <text x="650" y="135" font-family="Arial, sans-serif" font-size="14" text-anchor="middle" fill="#6B7280">
+      (Third-party)
+    </text>
+  </g>
+  
+  <!-- API Gateway -->
+  <g id="api-gateway" filter="url(#shadow)">
+    <rect x="200" y="220" width="400" height="100" rx="12" fill="url(#gatewayGradient)"/>
+    <text x="400" y="255" font-family="Arial, sans-serif" font-size="20" font-weight="bold" text-anchor="middle" fill="white">
+      API Gateway
+    </text>
+    <text x="400" y="280" font-family="Arial, sans-serif" font-size="14" text-anchor="middle" fill="white">
+      Port: 8001 | FastAPI + HTTPX
+    </text>
+    <text x="400" y="300" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="white">
+      Auth • Routing • Rate Limiting • CORS
+    </text>
+  </g>
+  
+  <!-- Microservices Layer -->
+  <text x="100" y="380" font-family="Arial, sans-serif" font-size="18" font-weight="bold" fill="#374151">
+    Microservices
+  </text>
+  
+  <!-- Auth Service -->
+  <g id="auth-service" filter="url(#shadow)">
+    <rect x="50" y="410" width="250" height="120" rx="12" fill="url(#authGradient)"/>
+    <text x="175" y="440" font-family="Arial, sans-serif" font-size="18" font-weight="bold" text-anchor="middle" fill="white">
+      Auth Service
+    </text>
+    <text x="175" y="460" font-family="Arial, sans-serif" font-size="13" text-anchor="middle" fill="white">
+      Port: 8000 |
+    </text>
+    <text x="175" y="485" font-family="Arial, sans-serif" font-size="11" text-anchor="middle" fill="white">
+      • JWT Management
+    </text>
+    <text x="175" y="500" font-family="Arial, sans-serif" font-size="11" text-anchor="middle" fill="white">
+      • User Authentication
+    </text>
+    <text x="175" y="515" font-family="Arial, sans-serif" font-size="11" text-anchor="middle" fill="white">
+      • OAuth Integration
+    </text>
+  </g>
+  
+  <!-- Tenant Service -->
+  <g id="tenant-service" filter="url(#shadow)">
+    <rect x="350" y="410" width="250" height="120" rx="12" fill="url(#tenantGradient)"/>
+    <text x="475" y="440" font-family="Arial, sans-serif" font-size="18" font-weight="bold" text-anchor="middle" fill="white">
+      Tenant Service
+    </text>
+    <text x="475" y="460" font-family="Arial, sans-serif" font-size="13" text-anchor="middle" fill="white">
+      Port: 8003 | 
+    </text>
+    <text x="475" y="485" font-family="Arial, sans-serif" font-size="11" text-anchor="middle" fill="white">
+      • Schema Provisioning &lt;10s
+    </text>
+    <text x="475" y="500" font-family="Arial, sans-serif" font-size="11" text-anchor="middle" fill="white">
+      • Tenant Isolation
+    </text>
+    <text x="475" y="515" font-family="Arial, sans-serif" font-size="11" text-anchor="middle" fill="white">
+      • Resource Monitoring
+    </text>
+  </g>
+  
+  <!-- User Service -->
+  <g id="user-service" filter="url(#shadow)">
+    <rect x="650" y="410" width="250" height="120" rx="12" fill="#DC2626" opacity="0.3"/>
+    <rect x="650" y="410" width="250" height="120" rx="12" fill="none" stroke="#DC2626" stroke-width="2" stroke-dasharray="5,5"/>
+    <text x="775" y="440" font-family="Arial, sans-serif" font-size="18" font-weight="bold" text-anchor="middle" fill="#DC2626">
+      User Service
+    </text>
+    <text x="775" y="460" font-family="Arial, sans-serif" font-size="13" text-anchor="middle" fill="#DC2626">
+      Port: 8004 | 
+    </text>
+    <text x="775" y="485" font-family="Arial, sans-serif" font-size="11" text-anchor="middle" fill="#DC2626">
+      • Profile Management
+    </text>
+    <text x="775" y="500" font-family="Arial, sans-serif" font-size="11" text-anchor="middle" fill="#DC2626">
+      • Preferences
+    </text>
+    <text x="775" y="515" font-family="Arial, sans-serif" font-size="11" text-anchor="middle" fill="#DC2626">
+      • Permissions
+    </text>
+  </g>
+  
+  <!-- Session Service -->
+  <g id="session-service" filter="url(#shadow)">
+    <rect x="950" y="410" width="250" height="120" rx="12" fill="#8B5CF6"/>
+    <text x="1075" y="440" font-family="Arial, sans-serif" font-size="18" font-weight="bold" text-anchor="middle" fill="white">
+      Session Service
+    </text>
+    <text x="1075" y="460" font-family="Arial, sans-serif" font-size="13" text-anchor="middle" fill="white">
+      Port: 8002 | 
+    </text>
+    <text x="1075" y="485" font-family="Arial, sans-serif" font-size="11" text-anchor="middle" fill="white">
+      • Session Storage
+    </text>
+    <text x="1075" y="500" font-family="Arial, sans-serif" font-size="11" text-anchor="middle" fill="white">
+      • Multi-device Support
+    </text>
+    <text x="1075" y="515" font-family="Arial, sans-serif" font-size="11" text-anchor="middle" fill="white">
+      • Session Analytics
+    </text>
+  </g>
+  
+  <!-- Data Layer -->
+  <text x="100" y="600" font-family="Arial, sans-serif" font-size="18" font-weight="bold" fill="#374151">
+    Data Layer
+  </text>
+  
+  <!-- PostgreSQL Cluster -->
+  <g id="postgres-cluster" filter="url(#shadow)">
+    <rect x="150" y="630" width="350" height="150" rx="12" fill="url(#dbGradient)"/>
+    <text x="325" y="665" font-family="Arial, sans-serif" font-size="20" font-weight="bold" text-anchor="middle" fill="white">
+      PostgreSQL Cluster
+    </text>
+    <text x="325" y="690" font-family="Arial, sans-serif" font-size="14" text-anchor="middle" fill="white">
+      Multi-Tenant Schemas
+    </text>
+    
+    <!-- Primary -->
+    <rect x="170" y="710" width="90" height="50" rx="6" fill="white" opacity="0.2"/>
+    <text x="215" y="740" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="white">
+      Primary
+    </text>
+    
+    <!-- Replica 1 -->
+    <rect x="280" y="710" width="90" height="50" rx="6" fill="white" opacity="0.2"/>
+    <text x="325" y="740" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="white">
+      Replica 1
+    </text>
+    
+    <!-- Replica 2 -->
+    <rect x="390" y="710" width="90" height="50" rx="6" fill="white" opacity="0.2"/>
+    <text x="435" y="740" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="white">
+      Replica 2
+    </text>
+  </g>
+  
+  <!-- Redis Cluster -->
+  <g id="redis-cluster" filter="url(#shadow)">
+    <rect x="550" y="630" width="300" height="150" rx="12" fill="#DC2626"/>
+    <text x="700" y="665" font-family="Arial, sans-serif" font-size="20" font-weight="bold" text-anchor="middle" fill="white">
+      Redis Cluster
+    </text>
+    <text x="700" y="690" font-family="Arial, sans-serif" font-size="14" text-anchor="middle" fill="white">
+      Cache &amp; Sessions
+    </text>
+    
+    <text x="700" y="720" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="white">
+      • User Sessions
+    </text>
+    <text x="700" y="740" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="white">
+      • API Cache
+    </text>
+    <text x="700" y="760" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="white">
+      • Pub/Sub Events
+    </text>
+  </g>
+  
+  <!-- S3 Storage -->
+  <g id="s3-storage" filter="url(#shadow)">
+    <rect x="900" y="630" width="250" height="150" rx="12" fill="#EA580C"/>
+    <text x="1025" y="665" font-family="Arial, sans-serif" font-size="20" font-weight="bold" text-anchor="middle" fill="white">
+      MA130
+    </text>
+    <text x="1025" y="690" font-family="Arial, sans-serif" font-size="14" text-anchor="middle" fill="white">
+      Backups &amp; Files
+    </text>
+    
+    <text x="1025" y="720" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="white">
+      • Tenant Backups
+    </text>
+    <text x="1025" y="740" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="white">
+      • Audit Logs
+    </text>
+    <text x="1025" y="760" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="white">
+      • Documents
+    </text>
+  </g>
+  
+  <!-- Connections -->
+  <!-- Client to Gateway -->
+  <line x1="150" y1="160" x2="300" y2="220" stroke="#6B7280" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <line x1="400" y1="160" x2="400" y2="220" stroke="#6B7280" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <line x1="650" y1="160" x2="500" y2="220" stroke="#6B7280" stroke-width="2" marker-end="url(#arrowhead)"/>
+  
+  <!-- Gateway to Services -->
+  <line x1="300" y1="320" x2="175" y2="410" stroke="#6B7280" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <line x1="400" y1="320" x2="475" y2="410" stroke="#6B7280" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <line x1="500" y1="320" x2="775" y2="410" stroke="#6B7280" stroke-width="2" marker-end="url(#arrowhead)" stroke-dasharray="5,5"/>
+  <line x1="550" y1="320" x2="1075" y2="410" stroke="#6B7280" stroke-width="2" marker-end="url(#arrowhead)"/>
+  
+  <!-- Services to Data Layer -->
+  <line x1="175" y1="530" x2="250" y2="630" stroke="#6B7280" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <line x1="475" y1="530" x2="400" y2="630" stroke="#6B7280" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <line x1="1075" y1="530" x2="700" y2="630" stroke="#6B7280" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <line x1="475" y1="530" x2="1025" y2="630" stroke="#6B7280" stroke-width="2" marker-end="url(#arrowhead)"/>
+  
+  <!-- Legend -->
+  <g id="legend">
+    <text x="1250" y="100" font-family="Arial, sans-serif" font-size="16" font-weight="bold" fill="#374151">
+      Status Legend
+    </text>
+    
+    <rect x="1250" y="120" width="20" height="20" rx="4" fill="#10B981"/>
+    <text x="1280" y="135" font-family="Arial, sans-serif" font-size="14" fill="#374151">
+      Implemented
+    </text>
+    
+    <rect x="1250" y="150" width="20" height="20" rx="4" fill="#F59E0B"/>
+    <text x="1280" y="165" font-family="Arial, sans-serif" font-size="14" fill="#374151">
+      In Progress
+    </text>
+    
+    <rect x="1250" y="180" width="20" height="20" rx="4" fill="#DC2626" opacity="0.3"/>
+    <rect x="1250" y="180" width="20" height="20" rx="4" fill="none" stroke="#DC2626" stroke-width="2" stroke-dasharray="2,2"/>
+    <text x="1280" y="195" font-family="Arial, sans-serif" font-size="14" fill="#374151">
+      Not Started
+    </text>
+  </g>
+</svg>
