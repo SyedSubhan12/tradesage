@@ -170,31 +170,49 @@ class EnhancedTradingRedisService:
         }
 
     async def connect(self):
-        """Initialize Redis connection with cluster support"""
+        """Initialize Redis connection with cluster support - FIXED"""
         try:
-            # Check if cluster mode is configured
-            redis_nodes = os.getenv("REDIS_CLUSTER_NODES", "localhost:7000,localhost:7001,localhost:7002").split(",")
+            # FIXED: Check if cluster mode is configured properly
+            redis_cluster_env = os.getenv("REDIS_CLUSTER_NODES")
             
-            if len(redis_nodes) > 1 and redis_nodes[0]:
-                # Redis Cluster mode
-                startup_nodes = [ClusterNode(node.split(':')[0], int(node.split(':')[1])) for node in redis_nodes if ':' in node]
+            if redis_cluster_env:
+                # Redis Cluster mode - only if explicitly configured
+                redis_nodes = redis_cluster_env.split(",")
+                startup_nodes = []
                 
-                self.redis_cluster = redis.RedisCluster(
-                    startup_nodes=startup_nodes,
-                    decode_responses=True,
-
-                    max_connections=100,
-                )
+                for node in redis_nodes:
+                    if ':' in node:
+                        try:
+                            host, port = node.split(':')
+                            startup_nodes.append(ClusterNode(host.strip(), int(port.strip())))
+                        except ValueError as e:
+                            logger.warning(f"Invalid Redis cluster node format '{node}': {e}")
+                            continue
                 
-                self.redis_client = self.redis_cluster
-                logger.info(f"Connected to Redis cluster with {len(startup_nodes)} nodes")
-                
-            else:
+                if startup_nodes:
+                    self.redis_cluster = redis.RedisCluster(
+                        startup_nodes=startup_nodes,
+                        decode_responses=True,
+                        max_connections=100,
+                        socket_timeout=10,
+                        socket_connect_timeout=5,
+                        health_check_interval=30
+                    )
+                    
+                    self.redis_client = self.redis_cluster
+                    logger.info(f"Connected to Redis cluster with {len(startup_nodes)} nodes")
+                else:
+                    logger.warning("No valid Redis cluster nodes, falling back to single instance")
+                    redis_cluster_env = None
+            
+            if not redis_cluster_env:
                 # Single Redis instance
                 self.redis_client = redis.from_url(
                     self.redis_url,
                     decode_responses=True,
-                    max_connections=50
+                    max_connections=50,
+                    socket_timeout=10,
+                    socket_connect_timeout=5
                 )
                 logger.info("Connected to single Redis instance")
             
@@ -205,6 +223,36 @@ class EnhancedTradingRedisService:
         except Exception as e:
             logger.error(f"Failed to connect to Redis: {e}")
             raise
+
+    async def invalidate_pattern(self, pattern: str):
+        """Invalidate cache entries matching the given pattern in Redis."""
+        try:
+            if self.redis_cluster:
+                cursor = 0
+                keys_to_delete = []
+                while True:
+                    cursor, keys = await self.redis_cluster.scan(cursor, match=pattern, count=1000)
+                    keys_to_delete.extend(keys)
+                    if cursor == 0:
+                        break
+                if keys_to_delete:
+                    await self.redis_cluster.delete(*keys_to_delete)
+                    logger.info(f"Invalidated {len(keys_to_delete)} cache entries for pattern: {pattern}")
+            elif self.redis_client:
+                cursor = 0
+                keys_to_delete = []
+                while True:
+                    cursor, keys = await self.redis_client.scan(cursor, match=pattern, count=1000)
+                    keys_to_delete.extend(keys)
+                    if cursor == 0:
+                        break
+                if keys_to_delete:
+                    await self.redis_client.delete(*keys_to_delete)
+                    logger.info(f"Invalidated {len(keys_to_delete)} cache entries for pattern: {pattern}")
+            else:
+                logger.warning("No Redis connection available for cache invalidation")
+        except Exception as e:
+            logger.error(f"Failed to invalidate cache pattern {pattern}: {e}")
 
     # ----------------------- Multi-Tier Cache Operations -----------------------
 
@@ -573,15 +621,18 @@ class EnhancedTradingRedisService:
             return {}
 
     async def cleanup_expired_keys(self, pattern: str = "*"):
-        """Cleanup expired keys (maintenance operation)"""
+        """Cleanup expired keys (maintenance operation) - FIXED"""
         try:
             cursor = 0
             cleaned_count = 0
             
             while True:
                 cursor, keys = await self.redis_client.scan(cursor=cursor, match=pattern, count=1000)
-                # Redis-py cluster may return keys as bytes – convert to str
-                keys = [k.decode() if isinstance(k, (bytes, bytearray)) else k for k in keys if isinstance(k, (str, bytes, bytearray))]
+                
+                # FIXED: Proper handling of keys regardless of cluster/single mode
+                if isinstance(keys, list):
+                    # Convert bytes to string if needed
+                    keys = [k.decode() if isinstance(k, (bytes, bytearray)) else str(k) for k in keys]
                 
                 if keys:
                     # Check TTL for each key and delete expired ones
@@ -589,13 +640,16 @@ class EnhancedTradingRedisService:
                     for key in keys:
                         pipe.ttl(key)
                     
-                    ttls = await pipe.execute()
-                    
-                    # TTL == -2 → key does not exist; TTL == -1 → no expire set
-                    expired_keys = [k for k, ttl in zip(keys, ttls) if ttl in (-2, None)]
-                    if expired_keys:
-                        await self.redis_client.delete(*expired_keys)
-                        cleaned_count += len(expired_keys)
+                    try:
+                        ttls = await pipe.execute()
+                        
+                        # TTL == -2 → key does not exist; TTL == -1 → no expire set
+                        expired_keys = [k for k, ttl in zip(keys, ttls) if ttl in (-2, None)]
+                        if expired_keys:
+                            await self.redis_client.delete(*expired_keys)
+                            cleaned_count += len(expired_keys)
+                    except Exception as e:
+                        logger.warning(f"Pipeline operation failed during cleanup: {e}")
                 
                 if cursor == 0:
                     break

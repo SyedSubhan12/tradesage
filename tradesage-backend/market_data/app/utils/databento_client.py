@@ -4,19 +4,20 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 from typing import List, Dict, Optional, Tuple
 import logging
+import re
 from .config import get_settings
 import time
 import requests
 from concurrent.futures import ThreadPoolExecutor
 import os
-
 logger = logging.getLogger(__name__)
 
 class DatabentoClient:
     """Enhanced Databento client with robust symbol discovery and error handling"""
     
     def __init__(self):
-        self.api_key = os.getenv("DATABENTO_API_KEY")
+        settings = get_settings()
+        self.api_key = os.getenv('DATABENTO_API_KEY') or settings.DATABENTO_API_KEY
         self.client = None
         self.session = requests.Session()
         self.executor = ThreadPoolExecutor(max_workers=4)
@@ -314,6 +315,26 @@ class DatabentoClient:
                 logger.warning("No symbols provided for OHLCV data")
                 return pd.DataFrame()
             
+            # Adjust end_date to prevent requesting data beyond available range
+            from datetime import datetime, timedelta
+            try:
+                end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                current_dt = datetime.now(end_dt.tzinfo)
+                if end_dt > current_dt:
+                    end_dt = current_dt - timedelta(days=1)
+                    end_date = end_dt.isoformat()
+                    logger.info(f"Adjusted end_date to {end_date} as it was beyond current date")
+                # Further adjust to ensure it's not beyond the dataset's available range
+                # Use a more conservative approach by setting the end date to the previous day
+                dataset_end_dt = current_dt.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=2)
+                if end_dt > dataset_end_dt:
+                    end_dt = dataset_end_dt
+                    end_date = end_dt.isoformat()
+                    logger.info(f"Further adjusted end_date to {end_date} to ensure it is within dataset availability")
+            except ValueError as e:
+                logger.error(f"Invalid date format for end_date: {e}")
+                return pd.DataFrame()
+            
             logger.debug(f"Fetching OHLCV data: {len(symbols)} symbols, {timeframe}, {start_date} to {end_date}")
             
             # Limit symbols to prevent API overload
@@ -354,7 +375,19 @@ class DatabentoClient:
                     break
                     
                 except Exception as e:
-                    logger.warning(f"OHLCV fetch attempt {attempt + 1} failed: {e}")
+                    error_msg = str(e)
+                    logger.warning(f"OHLCV fetch attempt {attempt + 1} failed: {error_msg}")
+
+                    # Automatically adjust end_date if it is beyond available range
+                    if "data_end_after_available_end" in error_msg and "available_end=" in error_msg:
+                        match = re.search(r"available_end=([0-9]{4}-[0-9]{2}-[0-9]{2})", error_msg)
+                        if match:
+                            new_end = match.group(1)
+                            if new_end != end_date:
+                                logger.info(f"Adjusting end_date from {end_date} to {new_end} and retrying...")
+                                end_date = new_end
+                                continue  # Retry immediately with corrected date
+                    
                     if attempt < 2:
                         time.sleep(2 ** attempt)  # Exponential backoff
                     else:

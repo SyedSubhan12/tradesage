@@ -43,7 +43,7 @@ class OHLCVBase(BaseModel):
     close: Optional[Decimal] = Field(None, ge=0)
     volume: Optional[int] = Field(None, ge=0)
     vwap: Optional[Decimal] = Field(None, ge=0)
-    trade_count: Optional[int] = Field(None, ge=0)  # Fixed: was trades_count
+    trades_count: Optional[int] = Field(None, ge=0)
 
 class OHLCVCreate(OHLCVBase):
     symbol_id: int  # Added missing field - this is the foreign key
@@ -80,7 +80,7 @@ class OHLCVCreateWithSymbol(BaseModel):
     close: Optional[Decimal] = Field(None, ge=0)
     volume: Optional[int] = Field(None, ge=0)
     vwap: Optional[Decimal] = Field(None, ge=0)
-    trade_count: Optional[int] = Field(None, ge=0)
+    trades_count: Optional[int] = Field(None, ge=0)
     
     @field_validator('high', 'low', 'close')
     @classmethod

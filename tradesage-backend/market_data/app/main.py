@@ -7,7 +7,7 @@ import time
 import logging
 from contextlib import asynccontextmanager
 import asyncio
-from typing import Dict, Any
+from typing import Dict, Any, Set  # ADDED: Set for tracking tasks
 import uvicorn
 import signal
 import sys
@@ -59,7 +59,7 @@ DATABASE_CONNECTIONS = Gauge('database_connections_active', 'Active database con
 INGESTION_RATE = Gauge('data_ingestion_records_per_second', 'Data ingestion rate')
 ERROR_RATE = Counter('errors_total', 'Total errors', ['error_type'])
 
-# Global service instances
+# FIXED: Global service instances with proper initialization tracking
 settings = get_settings()
 db_manager: OptimizedDatabaseManager = None
 redis_service: EnhancedTradingRedisService = None
@@ -67,6 +67,7 @@ websocket_manager: TradingViewWebSocketManager = None
 data_storage_service: DataStorageService = None
 ingestion_service: ProductionDataIngestionService = None
 
+background_tasks: Set[asyncio.Task] = set()
 class HealthCheckManager:
     """Centralized health check management"""
     
@@ -88,11 +89,18 @@ class HealthCheckManager:
         results = {}
         overall_healthy = True
         
+        import inspect  # added for sync/async check detection
+
         for name, check in self.checks.items():
             try:
-                result = await check['func']()
+                func = check['func']
+                # Support both sync and async health-check callables
+                if inspect.iscoroutinefunction(func):
+                    result = await func()
+                else:
+                    result = func()
                 results[name] = {
-                    'status': 'healthy' if result.get('status') == 'ok' else 'unhealthy',
+                    'status': 'healthy' if result.get('status') in ('ok', 'healthy') else 'unhealthy',
                     'details': result,
                     'critical': check['critical']
                 }
@@ -120,12 +128,16 @@ class HealthCheckManager:
 
 health_manager = HealthCheckManager()
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Enhanced application lifespan with comprehensive initialization"""
+    """FIXED: Enhanced application lifespan with comprehensive error handling"""
     logger.info("🚀 Starting TradeSage Market Data API (Production Mode)...")
     
-    global db_manager, redis_service, websocket_manager, data_storage_service, ingestion_service
+    global db_manager, redis_service, websocket_manager, data_storage_service, ingestion_service, background_tasks
+    
+    # Track what we've initialized for proper cleanup
+    initialized_services = []
     
     try:
         # ----------------------- Initialize Core Services -----------------------
@@ -134,23 +146,30 @@ async def lifespan(app: FastAPI):
         logger.info("📊 Initializing optimized database manager...")
         db_manager = OptimizedDatabaseManager(settings)
         await db_manager.initialize()
+        # Ensure global singleton is set for other modules
+        import app.utils.database as _db_mod
+        _db_mod._db_manager = db_manager
+        initialized_services.append('db_manager')
         logger.info("✅ Database manager initialized")
         
         # 2. Initialize enhanced Redis service
         logger.info("🔄 Initializing enhanced Redis service...")
         redis_service = EnhancedTradingRedisService(settings.REDIS_URL)
         await redis_service.connect()
+        initialized_services.append('redis_service')
         logger.info("✅ Redis service initialized")
         
         # 3. Initialize data storage service
         logger.info("💾 Initializing data storage service...")
         db_session = db_manager.get_sync_session()
         data_storage_service = DataStorageService(db_session, redis_service.redis_client)
+        initialized_services.append('data_storage_service')
         logger.info("✅ Data storage service initialized")
         
         # 4. Initialize WebSocket manager
         logger.info("🌐 Initializing WebSocket manager...")
         websocket_manager = TradingViewWebSocketManager(redis_service, data_storage_service)
+        initialized_services.append('websocket_manager')
         logger.info("✅ WebSocket manager initialized")
         
         # 5. Initialize production data ingestion service
@@ -163,6 +182,7 @@ async def lifespan(app: FastAPI):
             websocket_manager=websocket_manager
         )
         await ingestion_service.start_background_processing()
+        initialized_services.append('ingestion_service')
         logger.info("✅ Production data ingestion service initialized")
         
         # ----------------------- Register Health Checks -----------------------
@@ -183,7 +203,7 @@ async def lifespan(app: FastAPI):
                 
                 # Warm cache for popular symbols
                 if total_symbols > 0:
-                    popular_symbols = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA']  # Can be made configurable
+                    popular_symbols = settings.CACHE_WARM_SYMBOLS
                     await redis_service.warm_cache_for_symbols(popular_symbols)
                     logger.info("✅ Cache warmed for popular symbols")
                 
@@ -191,13 +211,15 @@ async def lifespan(app: FastAPI):
                 logger.error(f"❌ Initial data ingestion failed: {e}")
                 # Don't fail startup for ingestion errors
         
-        # ----------------------- Background Tasks -----------------------
+        # ----------------------- Background Tasks (FIXED) -----------------------
         
         # Start background metrics collection
-        asyncio.create_task(update_metrics_periodically())
+        task1 = asyncio.create_task(update_metrics_periodically())
+        background_tasks.add(task1)
         
         # Start background cache cleanup
-        asyncio.create_task(periodic_cache_cleanup())
+        task2 = asyncio.create_task(periodic_cache_cleanup())
+        background_tasks.add(task2)
         
         logger.info("🎉 TradeSage Market Data API started successfully!")
         logger.info(f"📊 Database pools: Read={db_manager.read_pool.get_size()}, Write={db_manager.write_pool.get_size()}")
@@ -207,40 +229,61 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"💥 Startup failed: {e}")
         logger.error(traceback.format_exc())
+        
+        # FIXED: Cleanup partial initialization
+        await cleanup_services(initialized_services)
         raise
     
     # App is running
     yield
     
-    # ----------------------- Shutdown Sequence -----------------------
+    # ----------------------- Shutdown Sequence (FIXED) -----------------------
     
     logger.info("🛑 Shutting down TradeSage Market Data API...")
     
+    await cleanup_services(initialized_services)
+    
+    logger.info("👋 TradeSage Market Data API shutdown complete")
+
+async def cleanup_services(initialized_services: list):
+    """Cleanup services in reverse order of initialization"""
+    
     try:
-        # Stop background processing
-        if ingestion_service:
+        # Cancel background tasks first
+        logger.info("🔄 Cancelling background tasks...")
+        for task in background_tasks:
+            task.cancel()
+        
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+            background_tasks.clear()
+            logger.info("✅ Background tasks cancelled")
+        
+        # Stop services in reverse order
+        if 'ingestion_service' in initialized_services and ingestion_service:
             await ingestion_service.stop_background_processing()
             logger.info("✅ Data ingestion service stopped")
         
-        # Disconnect WebSocket clients
-        if websocket_manager:
+        if 'websocket_manager' in initialized_services and websocket_manager:
             await websocket_manager.shutdown()
             logger.info("✅ WebSocket manager shutdown")
         
-        # Close database connections
-        if db_manager:
-            await db_manager.close()
-            logger.info("✅ Database connections closed")
+        if 'data_storage_service' in initialized_services and data_storage_service:
+            # Close the session that was created during initialization
+            if hasattr(data_storage_service, 'close'):
+                data_storage_service.close()
+            logger.info("✅ Data storage service closed")
         
-        # Close Redis connections
-        if redis_service:
+        if 'redis_service' in initialized_services and redis_service:
             await redis_service.redis_client.aclose()
             logger.info("✅ Redis connections closed")
         
+        if 'db_manager' in initialized_services and db_manager:
+            await db_manager.close()
+            logger.info("✅ Database connections closed")
+        
     except Exception as e:
         logger.error(f"❌ Shutdown error: {e}")
-    
-    logger.info("👋 TradeSage Market Data API shutdown complete")
 
 # Create FastAPI app with enhanced configuration
 app = FastAPI(
@@ -248,9 +291,9 @@ app = FastAPI(
     version=settings.APP_VERSION,
     description="Production-grade market data API for institutional trading platforms",
     lifespan=lifespan,
-    docs_url="/docs" if settings.DEBUG else None,
-    redoc_url="/redoc" if settings.DEBUG else None,
-    openapi_url="/openapi.json" if settings.DEBUG else None
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json"
 )
 
 # ----------------------- Middleware Configuration -----------------------
@@ -336,11 +379,11 @@ async def enhanced_request_middleware(request, call_next):
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """Enhanced WebSocket endpoint for real-time data"""
+    """FIXED: Enhanced WebSocket endpoint for real-time data"""
     client_id = None
     
     try:
-        # Connect client
+        # FIXED: Connect client without passing client_id parameter
         client_id = await websocket_manager.connect_client(websocket)
         WEBSOCKET_CONNECTIONS.inc()
         
@@ -376,15 +419,12 @@ app.include_router(news.router, prefix=settings.API_V1_STR, tags=["News Data"])
 async def tradingview_config():
     """TradingView configuration endpoint"""
     return {
-        "supported_resolutions": ["1", "5", "15", "30", "60", "240", "1D", "1W"],
+        "supported_resolutions": settings.TRADINGVIEW_SUPPORTED_RESOLUTIONS,
         "supports_group_request": False,
         "supports_marks": False,
         "supports_search": True,
         "supports_timescale_marks": False,
-        "exchanges": [
-            {"value": "NASDAQ", "name": "NASDAQ", "desc": "NASDAQ"},
-            {"value": "NYSE", "name": "NYSE", "desc": "New York Stock Exchange"}
-        ],
+        "exchanges": settings.TRADINGVIEW_EXCHANGES,
         "symbols_types": [
             {"name": "Stock", "value": "stock"}
         ],
@@ -672,7 +712,7 @@ async def http_exception_handler(request, exc):
         content={"message": exc.detail, "status_code": exc.status_code}
     )
 
-# ----------------------- Background Tasks -----------------------
+# ----------------------- Background Tasks (FIXED) -----------------------
 
 async def update_metrics_periodically():
     """Background task to update metrics periodically"""
@@ -684,6 +724,9 @@ async def update_metrics_periodically():
             # This function body would be populated with actual metric updates
             # The individual metrics are updated in the /metrics endpoint
             
+        except asyncio.CancelledError:
+            logger.info("Metrics update task cancelled")
+            break
         except Exception as e:
             logger.error(f"Metrics update error: {e}")
             await asyncio.sleep(60)
@@ -699,6 +742,9 @@ async def periodic_cache_cleanup():
                 await redis_service.cleanup_expired_keys()
                 logger.debug("Periodic cache cleanup completed")
                 
+        except asyncio.CancelledError:
+            logger.info("Cache cleanup task cancelled")
+            break
         except Exception as e:
             logger.error(f"Cache cleanup error: {e}")
             await asyncio.sleep(300)
@@ -716,7 +762,7 @@ async def root():
         "endpoints": {
             "health": "/health",
             "metrics": "/metrics",
-            "docs": "/docs" if settings.DEBUG else None,
+            "docs": "/docs", #if settings.DEBUG else None,
             "websocket": "/ws",
             "api": settings.API_V1_STR
         },

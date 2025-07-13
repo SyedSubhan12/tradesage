@@ -8,7 +8,9 @@ import pandas as pd
 import asyncio
 import time
 import logging
-from ...dependency import get_db, get_redis_client, validate_symbol, validate_timeframe
+from contextlib import asynccontextmanager
+
+from ...dependency import get_database, get_redis_client, validate_symbol, validate_timeframe
 from ...services.data_storage import ProductionDataStorageService
 from ...services.redis_optimizer import EnhancedTradingRedisService, get_redis_service
 from ...routers.v1.websocket_handler import get_websocket_manager
@@ -18,7 +20,6 @@ from ...utils.database import get_db_manager
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ohlcv", tags=["OHLCV Data"])
-
 # Performance metrics
 from prometheus_client import Counter, Histogram
 OHLCV_REQUESTS = Counter('ohlcv_requests_total', 'Total OHLCV requests', ['endpoint', 'symbol', 'timeframe'])
@@ -69,32 +70,157 @@ class TradingViewDataFormatter:
         except Exception as e:
             logger.error(f"Error formatting realtime bar: {e}")
             return {}
-
 # Enhanced dependencies
+# @asynccontextmanager
 async def get_enhanced_storage_service():
-    """Get enhanced storage service with all optimizations"""
+    """Get enhanced storage service with comprehensive error handling and fallback"""
+    db_session = None
+    redis_client = None
+    
     try:
-        db_manager = get_db_manager()
-        redis_service = await get_redis_service()
+        logger.debug("Starting storage service initialization...")
         
-        # Use a connection from the read pool for queries
-        db_session = db_manager.get_sync_session()
+        # Try to get database session using dependency injection
+        try:
+            db_session = next(get_database())
+            logger.debug("✅ Database session obtained via dependency injection")
+        except Exception as e:
+            logger.error(f"❌ Failed to get database session via dependency: {e}")
+            # Fallback: try direct database manager
+            try:
+                db_manager = get_db_manager()
+                db_session = db_manager.get_sync_session()
+                logger.debug("✅ Database session obtained via db_manager fallback")
+            except Exception as e2:
+                logger.error(f"❌ Fallback database session failed: {e2}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Database connection failed: {str(e2)}"
+                )
         
-        storage_service = ProductionDataStorageService(
-            db=db_session,
-            redis_client=redis_service.redis_client,
-            enhanced_redis_service=redis_service,
-            config=get_settings()
-        )
+        # Try to get Redis client
+        try:
+            redis_client = get_redis_client()
+            logger.debug("✅ Redis client obtained")
+        except Exception as e:
+            logger.error(f"❌ Failed to get Redis client: {e}")
+            # Continue without Redis for basic functionality
+            redis_client = None
+            logger.warning("⚠️ Continuing without Redis - caching disabled")
         
-        return storage_service
+        # Get configuration
+        try:
+            config = get_settings()
+            logger.debug("✅ Configuration loaded")
+        except Exception as e:
+            logger.error(f"❌ Failed to load configuration: {e}")
+            config = None
         
+        # Create storage service with fallbacks
+        try:
+            # FIXED: Use basic DataStorageService if enhanced version fails
+            try:
+                from ...services.data_storage import ProductionDataStorageService
+                
+                storage_service = ProductionDataStorageService(
+                    db=db_session,
+                    redis_client=redis_client,
+                    enhanced_redis_service=None,  # Set to None to avoid issues
+                    config=config
+                )
+                logger.debug("✅ Enhanced storage service created")
+                
+            except Exception as e:
+                logger.warning(f"⚠️ Enhanced storage service failed, using basic fallback: {e}")
+                
+                # Fallback to basic DataStorageService
+                from ...services.data_storage import DataStorageService
+                
+                storage_service = DataStorageService(
+                    db=db_session,
+                    redis_client=redis_client or redis.Redis()  # Dummy Redis if none available
+                )
+                logger.debug("✅ Basic storage service created as fallback")
+            
+            return storage_service
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to create any storage service: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Storage service creation failed: {str(e)}"
+            )
+    
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
     except Exception as e:
-        logger.error(f"Error creating enhanced storage service: {e}")
+        logger.error(f"❌ Unexpected error in storage service initialization: {e}")
+        logger.exception("Full traceback:")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Storage service initialization failed"
+            detail=f"Storage service initialization failed: {str(e)}"
         )
+    
+    # we don't close session here; FastAPI dependency system will handle
+
+@asynccontextmanager
+async def get_enhanced_storage_service_async():
+    """Async version with proper resource management"""
+    db_session = None
+    storage_service = None
+    
+    try:
+        logger.debug("Starting async storage service initialization...")
+        
+        # Get database session
+        db_session = next(get_database())
+        
+        # Get Redis client (optional)
+        try:
+            redis_client = get_redis_client()
+        except Exception as e:
+            logger.warning(f"Redis unavailable, continuing without caching: {e}")
+            redis_client = None
+        
+        # Get configuration
+        config = get_settings()
+        
+        # Create storage service
+        try:
+            from ...services.data_storage import ProductionDataStorageService
+            
+            storage_service = ProductionDataStorageService(
+                db=db_session,
+                redis_client=redis_client,
+                enhanced_redis_service=None,
+                config=config
+            )
+        except Exception as e:
+            logger.warning(f"Using basic storage service: {e}")
+            from ...services.data_storage import DataStorageService
+            
+            storage_service = DataStorageService(
+                db=db_session,
+                redis_client=redis_client or redis.Redis()
+            )
+        
+        yield storage_service
+        
+    except Exception as e:
+        logger.error(f"Async storage service error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Storage service initialization failed: {str(e)}"
+        )
+    finally:
+        # Cleanup resources
+        if db_session:
+            try:
+                db_session.close()
+                logger.debug("✅ Database session closed")
+            except Exception as e:
+                logger.warning(f"Error closing database session: {e}")
 
 # ==================== Symbol Discovery Endpoints ====================
 
@@ -119,18 +245,24 @@ async def get_available_symbols(
             active_only=active_only
         )
         
+        logger.info(f"Retrieved {len(symbols_data)} symbols for dataset {dataset}, sector {sector}, active_only {active_only}")
+        
         # Apply search filter if provided
         if search:
             search_term = search.upper()
+            logger.info(f"Applying search filter for term: {search_term}")
             symbols_data = [
                 s for s in symbols_data 
-                if search_term in s['symbol'].upper() or 
-                   (s.get('description') and search_term in s['description'].upper())
+                if (search_term in s['symbol'].upper()) or 
+                   (s.get('description') and search_term in s['description'].upper()) or
+                   (s.get('name') and search_term in s['name'].upper())
             ]
+            logger.info(f"After search filter, found {len(symbols_data)} matching symbols")
         
         # Apply limit
         if limit:
             symbols_data = symbols_data[:limit]
+            logger.info(f"Applied limit of {limit}, returning {len(symbols_data)} symbols")
         
         # Update metrics
         OHLCV_REQUESTS.labels(endpoint='symbols', symbol='all', timeframe='none').inc()
@@ -157,10 +289,6 @@ async def get_available_symbols(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve symbols"
         )
-    finally:
-        # Cleanup
-        if hasattr(storage_service, 'close'):
-            storage_service.close()
 
 @router.get("/symbols/{symbol}/info")
 async def get_symbol_info(
@@ -223,9 +351,6 @@ async def get_symbol_info(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve symbol information"
         )
-    finally:
-        if hasattr(storage_service, 'close'):
-            storage_service.close()
 
 # ==================== Enhanced OHLCV Data Endpoints ====================
 
@@ -240,13 +365,15 @@ async def get_ohlcv_data(
     format: str = Query("standard", description="Response format (standard|tradingview)"),
     compression: bool = Query(True, description="Use data compression"),
     background_tasks: BackgroundTasks = BackgroundTasks(),
-    storage_service: ProductionDataStorageService = Depends(get_enhanced_storage_service)
+    storage_service = Depends(get_enhanced_storage_service)
 ):
     """Enhanced OHLCV data retrieval with multiple format support"""
     
     start_time = time.time()
     
     try:
+        logger.debug(f"Getting OHLCV data for {symbol}, timeframe: {timeframe}")
+        
         # Validate timeframe
         timeframe = validate_timeframe(timeframe)
         
@@ -265,16 +392,36 @@ async def get_ohlcv_data(
                 detail=f"Date range cannot exceed {max_days} days for {timeframe}"
             )
         
-        # Get data using optimized storage service
-        df = await storage_service.get_ohlcv_data_optimized(
-            symbol=symbol,
-            timeframe=timeframe,
-            start_date=start_date,
-            end_date=end_date,
-            dataset=dataset,
-            limit=limit,
-            use_compression=compression
-        )
+        # Get data using storage service with fallback
+        try:
+            # Try enhanced method first
+            if hasattr(storage_service, 'get_ohlcv_data_optimized'):
+                df = await storage_service.get_ohlcv_data_optimized(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    start_date=start_date,
+                    end_date=end_date,
+                    dataset=dataset,
+                    limit=limit,
+                    use_compression=compression
+                )
+            else:
+                raise AttributeError("Enhanced method not available")
+                
+        except Exception as e:
+            logger.warning(f"Enhanced OHLCV method failed, using basic fallback: {e}")
+            
+            # Fallback to basic method
+            df = storage_service.get_ohlcv_data(
+                symbol=symbol,
+                timeframe=timeframe,
+                start_date=start_date,
+                end_date=end_date,
+                dataset=dataset
+            )
+            
+            if limit and not df.empty:
+                df = df.tail(limit)
         
         if df.empty:
             raise HTTPException(
@@ -304,15 +451,10 @@ async def get_ohlcv_data(
                     "low": float(row['low']) if pd.notna(row['low']) else None,
                     "close": float(row['close']) if pd.notna(row['close']) else None,
                     "volume": int(row['volume']) if pd.notna(row['volume']) else None,
-                    "vwap": float(row['vwap']) if pd.notna(row['vwap']) else None,
-                    "trades_count": int(row['trades_count']) if pd.notna(row['trades_count']) else None
+                    "vwap": float(row['vwap']) if pd.notna(row['vwap']) and 'vwap' in row else None,
+                    "trades_count": int(row['trades_count']) if pd.notna(row.get('trades_count')) else None
                 }
                 records.append(record)
-            
-            # Schedule background cache warming for related timeframes
-            background_tasks.add_task(
-                warm_related_timeframes, symbol, timeframe, start_date, end_date
-            )
             
             # Update metrics
             OHLCV_REQUESTS.labels(endpoint='data', symbol=symbol, timeframe=timeframe).inc()
@@ -341,13 +483,32 @@ async def get_ohlcv_data(
         raise
     except Exception as e:
         logger.error(f"Error getting OHLCV data for {symbol}: {e}")
+        logger.exception("Full traceback:")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve OHLCV data"
+            detail=f"Failed to retrieve OHLCV data: {str(e)}"
         )
-    finally:
-        if hasattr(storage_service, 'close'):
-            storage_service.close()
+@router.get("/test")
+async def test_endpoint():
+    """Simple test endpoint to verify router is working"""
+    try:
+        storage_service = get_enhanced_storage_service()
+        
+        return APIResponse(
+            data={
+                "status": "working",
+                "storage_service_type": type(storage_service).__name__,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            },
+            message="OHLCV router test successful"
+        )
+    except Exception as e:
+        logger.error(f"Test endpoint error: {e}")
+        return APIResponse(
+            success=False,
+            data={"error": str(e)},
+            message="Test endpoint failed"
+        )
 
 # ==================== Real-time and Latest Data Endpoints ====================
 

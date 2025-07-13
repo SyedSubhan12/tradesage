@@ -147,7 +147,6 @@ async def get_enhanced_storage_service():
         )
 
 # ==================== Core Trade Data Endpoints ====================
-
 @router.get("/{symbol}", response_model=APIResponse)
 async def get_trade_data(
     symbol: str = Depends(validate_symbol),
@@ -160,155 +159,152 @@ async def get_trade_data(
     max_size: Optional[int] = Query(None, ge=1, description="Maximum trade size filter"),
     format: str = Query("standard", regex="^(standard|csv|streaming)$", description="Response format"),
     include_analysis: bool = Query(False, description="Include trade analysis"),
-    background_tasks: BackgroundTasks = BackgroundTasks(),
-    storage_service: ProductionDataStorageService = Depends(get_enhanced_storage_service)
+    background_tasks: BackgroundTasks = BackgroundTasks()
 ):
     """Enhanced trade data retrieval with filtering and analysis"""
     
     start_time = time.time()
     
-    try:
-        # Validate date range
-        if start_date >= end_date:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Start date must be before end date"
-            )
-        
-        # Limit date range for performance (trades are high-frequency)
-        max_days = 7  # 1 week max for trade data
-        if (end_date - start_date).days > max_days:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Date range cannot exceed {max_days} days for trade data"
-            )
-        
-        # Validate size filters
-        if min_size and max_size and min_size > max_size:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Minimum size cannot be greater than maximum size"
-            )
-        
-        # Get trade data using optimized storage service
-        df = await storage_service.get_trade_data_optimized(
-            symbol=symbol,
-            start_date=start_date,
-            end_date=end_date,
-            dataset=dataset,
-            limit=limit,
-            trade_side=trade_side
-        )
-        
-        if df.empty:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"No trade data found for {symbol}"
-            )
-        
-        # Apply size filters
-        if min_size:
-            df = df[df['size'] >= min_size]
-        if max_size:
-            df = df[df['size'] <= max_size]
-        
-        # Handle different response formats
-        if format == "csv":
-            # Return CSV format
-            csv_buffer = io.StringIO()
-            df.to_csv(csv_buffer, index=True)
-            csv_content = csv_buffer.getvalue()
+    # FIXED: Use async context manager for proper resource cleanup
+    async with get_enhanced_storage_service() as storage_service:
+        try:
+            # Validate date range
+            if start_date >= end_date:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Start date must be before end date"
+                )
             
-            return StreamingResponse(
-                io.StringIO(csv_content),
-                media_type="text/csv",
-                headers={"Content-Disposition": f"attachment; filename={symbol}_trades.csv"}
+            # Limit date range for performance (trades are high-frequency)
+            max_days = 7  # 1 week max for trade data
+            if (end_date - start_date).days > max_days:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Date range cannot exceed {max_days} days for trade data"
+                )
+            
+            # Validate size filters
+            if min_size and max_size and min_size > max_size:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Minimum size cannot be greater than maximum size"
+                )
+            
+            # Get trade data using optimized storage service
+            df = await storage_service.get_trade_data_optimized(
+                symbol=symbol,
+                start_date=start_date,
+                end_date=end_date,
+                dataset=dataset,
+                limit=limit,
+                trade_side=trade_side
             )
-        
-        elif format == "streaming":
-            # Return streaming JSON for large datasets
-            return StreamingResponse(
-                stream_trade_data(df),
-                media_type="application/json"
-            )
-        
-        else:
-            # Standard JSON format
-            records = []
-            for timestamp, row in df.iterrows():
-                record = {
-                    "timestamp": timestamp.isoformat(),
-                    "price": float(row['price']),
-                    "size": int(row['size']),
-                    "side": row.get('side', 'unknown'),
-                    "trade_id": row.get('trade_id')
+            
+            if df.empty:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"No trade data found for {symbol}"
+                )
+            
+            # Apply size filters
+            if min_size:
+                df = df[df['size'] >= min_size]
+            if max_size:
+                df = df[df['size'] <= max_size]
+            
+            # Handle different response formats
+            if format == "csv":
+                # Return CSV format
+                csv_buffer = io.StringIO()
+                df.to_csv(csv_buffer, index=True)
+                csv_content = csv_buffer.getvalue()
+                
+                return StreamingResponse(
+                    io.StringIO(csv_content),
+                    media_type="text/csv",
+                    headers={"Content-Disposition": f"attachment; filename={symbol}_trades.csv"}
+                )
+            
+            elif format == "streaming":
+                # Return streaming JSON for large datasets
+                return StreamingResponse(
+                    stream_trade_data(df),
+                    media_type="application/json"
+                )
+            
+            else:
+                # FIXED: Standard JSON format with proper NaN handling
+                records = []
+                for timestamp, row in df.iterrows():
+                    record = {
+                        "timestamp": timestamp.isoformat(),
+                        "price": float(row['price']) if pd.notna(row['price']) else 0.0,
+                        "size": int(row['size']) if pd.notna(row['size']) else 0,
+                        "side": row.get('side', 'unknown') if pd.notna(row.get('side')) else 'unknown',
+                        "trade_id": row.get('trade_id') if pd.notna(row.get('trade_id')) else None
+                    }
+                    records.append(record)
+                
+                # Calculate basic statistics with NaN handling
+                stats = {
+                    "total_trades": len(records),
+                    "total_volume": int(df['size'].fillna(0).sum()),
+                    "vwap": TradeDataAnalyzer.calculate_vwap(df),
+                    "price_range": {
+                        "min": float(df['price'].fillna(0).min()),
+                        "max": float(df['price'].fillna(0).max())
+                    }
                 }
-                records.append(record)
-            
-            # Calculate basic statistics
-            stats = {
-                "total_trades": len(records),
-                "total_volume": int(df['size'].sum()),
-                "vwap": TradeDataAnalyzer.calculate_vwap(df),
-                "price_range": {
-                    "min": float(df['price'].min()),
-                    "max": float(df['price'].max())
+                
+                # Add detailed analysis if requested
+                analysis = {}
+                if include_analysis:
+                    analysis = {
+                        "distribution": TradeDataAnalyzer.calculate_trade_distribution(df),
+                        "large_trades": TradeDataAnalyzer.detect_large_trades(df),
+                        "time_analysis": await analyze_trade_timing(df)
+                    }
+                
+                # Schedule background cache warming
+                background_tasks.add_task(
+                    cache_related_trade_data, symbol, start_date, end_date
+                )
+                
+                # Update metrics
+                TRADES_REQUESTS.labels(endpoint='data', symbol=symbol).inc()
+                TRADES_DURATION.labels(endpoint='data').observe(time.time() - start_time)
+                TRADES_VOLUME_PROCESSED.inc(stats['total_volume'])
+                
+                response_data = {
+                    "symbol": symbol,
+                    "trades": records,
+                    "statistics": stats,
+                    "filters": {
+                        "start_date": start_date.isoformat(),
+                        "end_date": end_date.isoformat(),
+                        "trade_side": trade_side,
+                        "size_range": [min_size, max_size] if min_size or max_size else None,
+                        "dataset": dataset
+                    }
                 }
-            }
+                
+                if include_analysis:
+                    response_data["analysis"] = analysis
+                
+                return APIResponse(
+                    data=response_data,
+                    count=len(records),
+                    message=f"Retrieved {len(records)} trades for {symbol}"
+                )
             
-            # Add detailed analysis if requested
-            analysis = {}
-            if include_analysis:
-                analysis = {
-                    "distribution": TradeDataAnalyzer.calculate_trade_distribution(df),
-                    "large_trades": TradeDataAnalyzer.detect_large_trades(df),
-                    "time_analysis": await analyze_trade_timing(df)
-                }
-            
-            # Schedule background cache warming
-            background_tasks.add_task(
-                cache_related_trade_data, symbol, start_date, end_date
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting trade data for {symbol}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to retrieve trade data"
             )
-            
-            # Update metrics
-            TRADES_REQUESTS.labels(endpoint='data', symbol=symbol).inc()
-            TRADES_DURATION.labels(endpoint='data').observe(time.time() - start_time)
-            TRADES_VOLUME_PROCESSED.inc(stats['total_volume'])
-            
-            response_data = {
-                "symbol": symbol,
-                "trades": records,
-                "statistics": stats,
-                "filters": {
-                    "start_date": start_date.isoformat(),
-                    "end_date": end_date.isoformat(),
-                    "trade_side": trade_side,
-                    "size_range": [min_size, max_size] if min_size or max_size else None,
-                    "dataset": dataset
-                }
-            }
-            
-            if include_analysis:
-                response_data["analysis"] = analysis
-            
-            return APIResponse(
-                data=response_data,
-                count=len(records),
-                message=f"Retrieved {len(records)} trades for {symbol}"
-            )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting trade data for {symbol}: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve trade data"
-        )
-    finally:
-        if hasattr(storage_service, 'close'):
-            storage_service.close()
-
 # ==================== Real-time Trade Endpoints ====================
 
 @router.get("/{symbol}/latest", response_model=APIResponse)
@@ -586,7 +582,7 @@ async def get_order_flow(
 # ==================== Utility Functions ====================
 
 async def stream_trade_data(df: pd.DataFrame) -> AsyncGenerator[str, None]:
-    """Stream trade data for large datasets"""
+    """Stream trade data for large datasets - FIXED NaN handling"""
     try:
         yield '{"trades": ['
         
@@ -595,12 +591,13 @@ async def stream_trade_data(df: pd.DataFrame) -> AsyncGenerator[str, None]:
             if not first:
                 yield ","
             
+            # FIXED: Proper NaN handling for all fields
             trade = {
                 "timestamp": timestamp.isoformat(),
-                "price": float(row['price']),
-                "size": int(row['size']),
-                "side": row.get('side', 'unknown'),
-                "trade_id": row.get('trade_id')
+                "price": float(row['price']) if pd.notna(row['price']) else 0.0,
+                "size": int(row['size']) if pd.notna(row['size']) else 0,
+                "side": row.get('side', 'unknown') if pd.notna(row.get('side')) else 'unknown',
+                "trade_id": row.get('trade_id') if pd.notna(row.get('trade_id')) else None
             }
             
             yield json.dumps(trade)
@@ -614,7 +611,7 @@ async def stream_trade_data(df: pd.DataFrame) -> AsyncGenerator[str, None]:
     except Exception as e:
         logger.error(f"Error streaming trade data: {e}")
         yield f'{{"error": "{str(e)}"}}'
-
+    
 async def analyze_trade_timing(df: pd.DataFrame) -> Dict[str, Any]:
     """Analyze trade timing patterns"""
     try:
@@ -927,3 +924,79 @@ async def get_trades_performance_stats():
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve performance statistics"
         )
+class TradeDataAnalyzer:
+    """Advanced trade data analysis and aggregation"""
+    
+    @staticmethod
+    def calculate_vwap(trades_df: pd.DataFrame) -> float:
+        """Calculate Volume Weighted Average Price - FIXED NaN handling"""
+        try:
+            if trades_df.empty or 'price' not in trades_df.columns or 'size' not in trades_df.columns:
+                return 0.0
+            
+            # FIXED: Handle NaN values before calculation
+            clean_df = trades_df.dropna(subset=['price', 'size'])
+            if clean_df.empty:
+                return 0.0
+            
+            total_volume = clean_df['size'].sum()
+            if total_volume == 0:
+                return 0.0
+            
+            weighted_prices = (clean_df['price'] * clean_df['size']).sum()
+            return float(weighted_prices / total_volume)
+            
+        except Exception as e:
+            logger.error(f"VWAP calculation error: {e}")
+            return 0.0
+    
+    @staticmethod
+    def calculate_trade_distribution(trades_df: pd.DataFrame) -> Dict[str, Any]:
+        """Calculate trade size and time distribution - FIXED NaN handling"""
+        try:
+            if trades_df.empty:
+                return {}
+            
+            # FIXED: Clean data before analysis
+            clean_df = trades_df.dropna(subset=['price', 'size'])
+            if clean_df.empty:
+                return {"error": "No valid data after cleaning"}
+            
+            distribution = {
+                'size_stats': {
+                    'min_trade_size': int(clean_df['size'].min()),
+                    'max_trade_size': int(clean_df['size'].max()),
+                    'avg_trade_size': float(clean_df['size'].mean()),
+                    'median_trade_size': float(clean_df['size'].median()),
+                    'total_volume': int(clean_df['size'].sum()),
+                    'trade_count': len(clean_df)
+                },
+                'price_impact': {
+                    'price_range': float(clean_df['price'].max() - clean_df['price'].min()),
+                    'price_volatility': float(clean_df['price'].std()),
+                    'avg_price': float(clean_df['price'].mean())
+                }
+            }
+            
+            # Side distribution if available
+            if 'side' in clean_df.columns:
+                side_counts = clean_df['side'].value_counts()
+                distribution['side_distribution'] = side_counts.to_dict()
+                
+                # Calculate buy/sell pressure
+                buy_volume = clean_df[clean_df['side'] == 'buy']['size'].sum() if 'buy' in side_counts else 0
+                sell_volume = clean_df[clean_df['side'] == 'sell']['size'].sum() if 'sell' in side_counts else 0
+                total_volume = buy_volume + sell_volume
+                
+                if total_volume > 0:
+                    distribution['market_pressure'] = {
+                        'buy_pressure': float(buy_volume / total_volume),
+                        'sell_pressure': float(sell_volume / total_volume),
+                        'net_pressure': float((buy_volume - sell_volume) / total_volume)
+                    }
+            
+            return distribution
+            
+        except Exception as e:
+            logger.error(f"Trade distribution calculation error: {e}")
+            return {"error": str(e)}

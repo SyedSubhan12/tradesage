@@ -162,7 +162,7 @@ class ProductionDataIngestionService:
         self.batch_size_ohlcv = 1000
         self.batch_size_trades = 5000
         
-        # Circuit breakers for external APIs
+        # FIXED: Initialize circuit breakers properly
         self.databento_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=120)
         self.db_breaker = CircuitBreaker(failure_threshold=5, recovery_timeout=60)
         
@@ -197,44 +197,7 @@ class ProductionDataIngestionService:
         # Wait for tasks to complete
         await asyncio.gather(*self.background_tasks, return_exceptions=True)
         self.background_tasks.clear()
-
     # ----------------------- Enhanced Symbol Ingestion -----------------------
-
-    async def ingest_symbols_parallel(self, datasets: List[str]) -> Dict[str, int]:
-        """Ingest symbols for multiple datasets in parallel"""
-        start_time = time.time()
-        results = {}
-        
-        logger.info(f"Starting parallel symbol ingestion for {len(datasets)} datasets")
-        
-        # Create semaphore to limit concurrent API calls
-        semaphore = asyncio.Semaphore(self.max_concurrent_requests)
-        
-        async def process_dataset(dataset: str) -> Tuple[str, int]:
-            async with semaphore:
-                return dataset, await self.ingest_symbols_optimized(dataset)
-        
-        # Process datasets in parallel
-        tasks = [process_dataset(dataset) for dataset in datasets]
-        completed_results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Process results
-        total_ingested = 0
-        for result in completed_results:
-            if isinstance(result, Exception):
-                logger.error(f"Dataset ingestion failed: {result}")
-                self.metrics.errors_encountered += 1
-            else:
-                dataset, count = result
-                results[dataset] = count
-                total_ingested += count
-        
-        processing_time = time.time() - start_time
-        self.metrics.processing_time += processing_time
-        self.metrics.symbols_processed += total_ingested
-        
-        logger.info(f"Parallel symbol ingestion completed: {total_ingested} symbols in {processing_time:.2f}s")
-        return results
 
     async def ingest_symbols_optimized(self, dataset: str) -> int:
         """Optimized symbol ingestion with caching and validation"""
@@ -401,6 +364,49 @@ class ProductionDataIngestionService:
             logger.error(f"Error processing symbol batch: {e}")
             self.db_breaker.record_failure()
             raise
+    # ----------------------- Parallel Symbol Ingestion -----------------------
+    async def ingest_symbols_parallel(
+        self,
+        datasets: List[str],
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> Dict[str, int]:
+        """Ingest symbols for many datasets concurrently.
+
+        Parameters
+        ----------
+        datasets : list[str]
+            List of dataset codes (e.g. ['XNAS.ITCH', 'XNYS.PILLAR']).
+        start_date / end_date : str, optional
+            Placeholder for future extension; currently unused. Could be used to
+            trigger follow-up OHLCV ingestion right after symbol insertion.
+
+        Returns
+        -------
+        dict
+            Mapping of dataset -> number of symbols inserted to the DB.
+        """
+        if not datasets:
+            return {}
+
+        results: Dict[str, int] = {}
+        semaphore = asyncio.Semaphore(self.max_concurrent_requests)
+
+        async def _ingest_dataset(ds: str):
+            async with semaphore:
+                try:
+                    count = await self.ingest_symbols_optimized(ds)
+                    results[ds] = count
+                except Exception as exc:
+                    logger.error("Symbol ingestion failed for %s: %s", ds, exc)
+                    self.metrics.errors_encountered += 1
+                    results[ds] = 0
+
+        await asyncio.gather(*[_ingest_dataset(ds) for ds in datasets])
+
+        # Update high-level metric
+        self.metrics.symbols_processed += sum(results.values())
+        return results
 
     # ----------------------- Enhanced OHLCV Ingestion -----------------------
 

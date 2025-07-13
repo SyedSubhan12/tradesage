@@ -6,15 +6,16 @@ import redis
 from typing import Generator
 import os
 from .utils.config import get_settings
-from .utils.database import get_db
+from .utils.database import get_db, get_db_manager
 import logging
 
 logger = logging.getLogger(__name__)
 
 # Database dependency
 def get_database() -> Generator[Session, None, None]:
-    """Dependency to get database session"""
-    db = next(get_db())
+    """Dependency to get database session with proper lifecycle management"""
+    db_manager = get_db_manager()
+    db = db_manager.get_sync_session()  # FIXED: Get session from manager
     try:
         yield db
     except Exception as e:
@@ -32,11 +33,8 @@ def get_redis_client():
     """Dependency to get Redis client"""
     try:
         settings = get_settings()
-        client = os.getenv(
-            "REDIS_URL",
-            "redis://localhost:6379/0"
-        )
-        client = redis.from_url(client)
+        redis_url = os.getenv("REDIS_URL", settings.REDIS_URL)
+        client = redis.from_url(redis_url)
         
         client.ping()  # Test connection
         return client
@@ -46,6 +44,8 @@ def get_redis_client():
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Cache service unavailable"
         )
+
+
 
 # Authentication dependency (placeholder for future implementation)
 def get_current_user():
@@ -81,3 +81,7 @@ def validate_timeframe(timeframe: str) -> str:
             detail=f"Invalid timeframe. Must be one of: {', '.join(valid_timeframes)}"
         )
     return timeframe
+def get_db() -> Generator[Session, None, None]:
+    """Alternative database dependency using manager's built-in method"""
+    db_manager = get_db_manager()
+    yield from db_manager.get_db()

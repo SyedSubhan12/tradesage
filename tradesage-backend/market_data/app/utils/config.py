@@ -1,6 +1,6 @@
 from typing import Dict, Any, Optional, List
 from pydantic_settings import BaseSettings
-from pydantic import Field, validator
+from pydantic import Field, field_validator  # FIXED: Updated import for Pydantic v2
 import structlog
 import asyncio
 from datetime import datetime, timezone, timedelta
@@ -24,13 +24,17 @@ class ProductionSettings(BaseSettings):
     PORT: int = Field(default=8005, description="Server port")
     
     # ==================== Database Configuration ====================
-    # Primary database (writes)
-    POSTGRES_URL: str = Field(default_factory=lambda: os.getenv("POSTGRES_URL"), description="Primary PostgreSQL connection string")
-       
-
+    # FIXED: Changed to DATABASE_URL to match database.py expectations
+    DATABASE_URL: str = Field(
+        default="postgresql://postgres:postgres@localhost:5432/postgres",
+        description="Primary PostgreSQL connection string"
+    )
     
     # Read replica (optional, falls back to primary)
-    READ_REPLICA_URL: Optional[str] = Field(default_factory=lambda: os.getenv("READ_REPLICA_URL"), description="Read replica PostgreSQL connection string")
+    READ_REPLICA_URL: Optional[str] = Field(
+        default=None, 
+        description="Read replica PostgreSQL connection string"
+    )
     
     # Database pool settings
     DB_POOL_SIZE: int = Field(default=20, description="Database connection pool size")
@@ -44,10 +48,16 @@ class ProductionSettings(BaseSettings):
     
     # ==================== Redis Configuration ====================
     # Single Redis instance
-    REDIS_URL: str = Field(default_factory=lambda: os.getenv("REDIS_URL"), description="Redis connection string")
+    REDIS_URL: str = Field(
+        default="redis://localhost:6379/0",
+        description="Redis connection string"
+    )
     
-    # Redis Cluster (comma-separated nodes for production)
-    REDIS_CLUSTER_NODES: Optional[str] = Field(default_factory=lambda: os.getenv("REDIS_CLUSTER_NODES"), description="Redis cluster nodes (host:port,host:port)")
+    # FIXED: No default value to properly detect cluster mode
+    REDIS_CLUSTER_NODES: Optional[str] = Field(
+        default=None, 
+        description="Redis cluster nodes (host:port,host:port)"
+    )
     
     # Redis connection settings
     REDIS_MAX_CONNECTIONS: int = Field(default=50, description="Redis max connections")
@@ -56,10 +66,8 @@ class ProductionSettings(BaseSettings):
     REDIS_HEALTH_CHECK_INTERVAL: int = Field(default=30, description="Redis health check interval")
     
     # ==================== Data Source Configuration ====================
-    DATABENTO_API_KEY: str = Field(
-        default="db-Jn7AnuuRLtWXAKBFp59Y4hbAvXKta",
-        description="Databento API key"
-    )
+    # Databento API key (imported from .env)
+    DATABENTO_API_KEY: Optional[str] = None
     
     # Datasets to process
     DATASETS: List[str] = Field(
@@ -91,7 +99,7 @@ class ProductionSettings(BaseSettings):
     L1_CACHE_OHLCV_SIZE: int = Field(default=2000, description="L1 OHLCV cache size")
     L1_CACHE_SYMBOLS_SIZE: int = Field(default=100, description="L1 symbols cache size")
     
-    # Cache TTL settings (seconds)
+    # FIXED: Centralized TTL calculation with consistent logic
     CACHE_TTL_REALTIME: int = Field(default=30, description="Real-time data cache TTL")
     CACHE_TTL_MINUTE: int = Field(default=300, description="Minute data cache TTL")
     CACHE_TTL_HOUR: int = Field(default=3600, description="Hour data cache TTL")
@@ -228,23 +236,26 @@ class ProductionSettings(BaseSettings):
     JAEGER_ENDPOINT: Optional[str] = Field(default=None, description="Jaeger tracing endpoint")
     ENABLE_DISTRIBUTED_TRACING: bool = Field(default=False, description="Enable distributed tracing")
     
-    # ==================== Validators ====================
-    @validator('LOG_LEVEL')
-    def validate_log_level(cls, v):
+    # ==================== Validators (FIXED for Pydantic v2) ====================
+    @field_validator('LOG_LEVEL')
+    @classmethod
+    def validate_log_level(cls, v: str) -> str:
         valid_levels = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
         if v.upper() not in valid_levels:
             raise ValueError(f'LOG_LEVEL must be one of {valid_levels}')
         return v.upper()
     
-    @validator('ENVIRONMENT')
-    def validate_environment(cls, v):
+    @field_validator('ENVIRONMENT')
+    @classmethod
+    def validate_environment(cls, v: str) -> str:
         valid_envs = ['development', 'staging', 'production']
         if v.lower() not in valid_envs:
             raise ValueError(f'ENVIRONMENT must be one of {valid_envs}')
         return v.lower()
     
-    @validator('CACHE_EVICTION_POLICY')
-    def validate_cache_policy(cls, v):
+    @field_validator('CACHE_EVICTION_POLICY')
+    @classmethod
+    def validate_cache_policy(cls, v: str) -> str:
         valid_policies = ['allkeys-lru', 'volatile-lru', 'allkeys-random', 'volatile-random', 'volatile-ttl', 'noeviction']
         if v not in valid_policies:
             raise ValueError(f'CACHE_EVICTION_POLICY must be one of {valid_policies}')
@@ -276,10 +287,10 @@ class ProductionSettings(BaseSettings):
         """Check if read replica is configured"""
         return bool(self.READ_REPLICA_URL)
     
-    # ==================== Cache TTL Mapping ====================
+    # ==================== Cache TTL Mapping (FIXED: Consistent logic) ====================
     def get_cache_ttl(self, timeframe: str) -> int:
-        """Get appropriate cache TTL for timeframe"""
-        ttl_mapping = {
+        """Get appropriate cache TTL for timeframe with consistent logic"""
+        base_ttl_mapping = {
             'ohlcv-1s': self.CACHE_TTL_REALTIME,
             'ohlcv-1m': self.CACHE_TTL_MINUTE,
             'ohlcv-5m': self.CACHE_TTL_MINUTE,
@@ -290,16 +301,17 @@ class ProductionSettings(BaseSettings):
             'ohlcv-1d': self.CACHE_TTL_DAILY,
             'ohlcv-1w': self.CACHE_TTL_DAILY * 2,
             'symbols': self.CACHE_TTL_SYMBOLS,
-            'price': self.CACHE_TTL_REALTIME
+            'price': self.CACHE_TTL_REALTIME,
+            'trades': self.CACHE_TTL_MINUTE
         }
-        return ttl_mapping.get(timeframe, self.CACHE_TTL_MINUTE)
+        return base_ttl_mapping.get(timeframe, self.CACHE_TTL_MINUTE)
     
-    # ==================== Database URL Processing ====================
+    # ==================== Database URL Processing (FIXED) ====================
     def get_database_urls(self) -> Dict[str, str]:
         """Get processed database URLs"""
         urls = {
-            'primary': self.POSTGRES_URL,
-            'read_replica': self.READ_REPLICA_URL or self.POSTGRES_URL
+            'primary': self.DATABASE_URL,
+            'read_replica': self.READ_REPLICA_URL or self.DATABASE_URL
         }
         
         # Add asyncpg support if not present
@@ -360,7 +372,8 @@ class ProductionSettings(BaseSettings):
             self.CACHE_TTL_MINUTE = 60  # Shorter cache for development
     
     class Config:
-        env_file = ".env"
+        # Always load the .env that sits in the root of the market_data package
+        env_file = str((Path(__file__).resolve().parents[2] / ".env"))
         env_file_encoding = "utf-8"
         case_sensitive = True
         extra = "ignore"
@@ -374,9 +387,9 @@ class ProductionSettings(BaseSettings):
                 "APP_NAME": "TradeSage Market Data API",
                 "ENVIRONMENT": "production",
                 "DEBUG": False,
-                "POSTGRES_URL": "postgresql://user:pass@localhost:5432/tradesage",
+                "DATABASE_URL": "postgresql://user:pass@localhost:5432/tradesage",
                 "REDIS_URL": "redis://localhost:6379/0",
-                "DATABENTO_API_KEY": "your-api-key-here"
+                "DATABENTO_API_KEY": "<your-api-key>"
             }
         }
 

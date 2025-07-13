@@ -87,38 +87,39 @@ class DataCompressionService:
     
     @staticmethod
     def compress_ohlcv_dataframe(df: pd.DataFrame) -> bytes:
-        """Compress OHLCV DataFrame for storage"""
+        """Compress OHLCV DataFrame to bytes using Parquet/Brotli"""
+        import io, pickle
         try:
-            # Convert to more efficient data types
-            df_compressed = df.copy()
-            
-            # Convert float64 to float32 where precision allows
-            float_columns = ['open', 'high', 'low', 'close', 'vwap']
-            for col in float_columns:
-                if col in df_compressed.columns:
-                    df_compressed[col] = pd.to_numeric(df_compressed[col], downcast='float')
-            
-            # Convert int64 to smaller ints where possible
-            if 'volume' in df_compressed.columns:
-                df_compressed['volume'] = pd.to_numeric(df_compressed['volume'], downcast='integer')
-            
-            # Use parquet compression
-            return df_compressed.to_parquet(compression='brotli')
-            
+            df_copy = df.copy()
+            float_cols = ['open', 'high', 'low', 'close', 'vwap']
+            for col in float_cols:
+                if col in df_copy.columns:
+                    df_copy[col] = pd.to_numeric(df_copy[col], downcast='float')
+            if 'volume' in df_copy.columns:
+                df_copy['volume'] = pd.to_numeric(df_copy['volume'], downcast='integer')
+            buf = io.BytesIO()
+            df_copy.to_parquet(buf, compression='brotli', index=True)
+            return buf.getvalue()
         except Exception as e:
             logger.warning(f"DataFrame compression failed: {e}")
-            # Fallback to pickle
-            return df.to_pickle()
+            # Fallback to pickle bytes
+            return pickle.dumps(df)
+
     
     @staticmethod
     def decompress_ohlcv_dataframe(compressed_data: bytes) -> pd.DataFrame:
-        """Decompress OHLCV DataFrame"""
+        """Decompress OHLCV DataFrame bytes produced by compress_ohlcv_dataframe"""
+        import io, pickle
         try:
-            # Try parquet first
-            return pd.read_parquet(compressed_data)
+            return pd.read_parquet(io.BytesIO(compressed_data))
         except Exception:
             # Fallback to pickle
-            return pd.read_pickle(compressed_data)
+            try:
+                return pickle.loads(compressed_data)
+            except Exception as e:
+                logger.warning(f"Failed to decompress OHLCV DataFrame: {e}")
+                return pd.DataFrame()
+
 
 class ProductionDataStorageService:
     """Production-grade data storage service with advanced caching and optimization"""
@@ -291,15 +292,20 @@ class ProductionDataStorageService:
             query_parts = [
                 "SELECT timestamp, open, high, low, close, volume, vwap, trades_count",
                 "FROM ohlcv_data",
-                "WHERE symbol = %s AND timeframe = %s",
-                "AND timestamp >= %s AND timestamp <= %s"
+                "WHERE symbol = :symbol AND timeframe = :timeframe",
+                "AND timestamp >= :start_date AND timestamp <= :end_date"
             ]
             
-            params = [symbol, timeframe, start_date, end_date]
+            params = {
+                'symbol': symbol,
+                'timeframe': timeframe,
+                'start_date': start_date,
+                'end_date': end_date
+            }
             
             if dataset:
-                query_parts.append("AND dataset = %s")
-                params.append(dataset)
+                query_parts.append("AND dataset = :dataset")
+                params['dataset'] = dataset
             
             # Add market hours filter for better performance on large datasets
             if timeframe in ['ohlcv-1m', 'ohlcv-5m']:
@@ -308,8 +314,8 @@ class ProductionDataStorageService:
             query_parts.append("ORDER BY timestamp")
             
             if limit:
-                query_parts.append("LIMIT %s")
-                params.append(limit)
+                query_parts.append("LIMIT :limit")
+                params['limit'] = limit
             
             query = " ".join(query_parts)
             
@@ -317,7 +323,8 @@ class ProductionDataStorageService:
             start_time = time.time()
             
             # Use raw SQL for better performance
-            result = self.db.execute(text(query), params)
+            sql_text = text(query)
+            result = self.db.execute(sql_text, params)
             rows = result.fetchall()
             
             query_time = time.time() - start_time
@@ -377,12 +384,13 @@ class ProductionDataStorageService:
     async def _get_from_redis_async(self, key: str) -> Optional[Any]:
         """Async Redis get operation"""
         try:
-            if hasattr(self.redis_client, 'get'):
-                # Sync Redis client
-                return self.redis_client.get(key)
+            import inspect
+            if asyncio.iscoroutinefunction(self.redis_client.get):
+                result = await self.redis_client.get(key)
             else:
-                # Async Redis client
-                return await self.redis_client.get(key)
+                result = self.redis_client.get(key)
+            return result
+            
         except Exception as e:
             logger.warning(f"Redis get error for {key}: {e}")
             return None
@@ -390,12 +398,11 @@ class ProductionDataStorageService:
     async def _set_to_redis_async(self, key: str, value: Any, ttl: int):
         """Async Redis set operation"""
         try:
-            if hasattr(self.redis_client, 'setex'):
-                # Sync Redis client
-                self.redis_client.setex(key, ttl, value)
-            else:
-                # Async Redis client
+            import inspect
+            if asyncio.iscoroutinefunction(self.redis_client.setex):
                 await self.redis_client.setex(key, ttl, value)
+            else:
+                self.redis_client.setex(key, ttl, value)
         except Exception as e:
             logger.warning(f"Redis set error for {key}: {e}")
 
@@ -532,9 +539,10 @@ class ProductionDataStorageService:
                     'market_cap': symbol.market_cap,
                     'currency': symbol.currency,
                     'exchange': symbol.exchange,
+                    'instrument_id': symbol.instrument_id,
                     'is_active': symbol.is_active,
-                    'created_at': symbol.created_at.isoformat() if symbol.created_at else None,
-                    'updated_at': symbol.updated_at.isoformat() if symbol.updated_at else None
+                    'created_at': symbol.created_at,
+                    'updated_at': symbol.updated_at
                 })
             
             return symbols

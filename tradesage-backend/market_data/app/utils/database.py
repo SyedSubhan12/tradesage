@@ -54,12 +54,12 @@ class OptimizedDatabaseManager:
     async def initialize(self):
         """Initialize optimized connection pools with circuit breaker protection"""
         try:
-            # Get database URLs
-            raw_database_url = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/postgres")
+            # FIXED: Use DATABASE_URL to match config.py
+            raw_database_url = os.getenv("DATABASE_URL", self.config.DATABASE_URL)
             self.asyncpg_database_url = self._clean_database_url(raw_database_url)
             
             # Read replica URL (fallback to primary if not set)
-            read_replica_url = os.getenv("READ_REPLICA_URL", self.asyncpg_database_url)
+            read_replica_url = os.getenv("READ_REPLICA_URL", self.config.READ_REPLICA_URL or self.asyncpg_database_url)
             
             logger.info(f"Primary DB: {self.asyncpg_database_url}")
             logger.info(f"Read Replica: {read_replica_url}")
@@ -92,30 +92,58 @@ class OptimizedDatabaseManager:
                 }
             )
 
-            # ----------------------- Redis Cluster Setup -----------------------
-            redis_nodes = os.getenv("REDIS_CLUSTER_NODES", "localhost:7000,localhost:7001,localhost:7002").split(",")
+            # ----------------------- Redis Cluster Setup (FIXED) -----------------------
+            redis_cluster_env = os.getenv("REDIS_CLUSTER_NODES", self.config.REDIS_CLUSTER_NODES)
             
-            if len(redis_nodes) > 1:
-                # Redis Cluster mode for production
-                startup_nodes = [
-                    ClusterNode(node.split(":")[0], int(node.split(":")[1]))
-                    for node in redis_nodes
-                ]
+            if redis_cluster_env:
+                # FIXED: Proper cluster mode detection and error handling
+                redis_nodes = redis_cluster_env.split(",")
+                startup_nodes = []
                 
-                self.redis_cluster = redis.asyncio.RedisCluster(startup_nodes=startup_nodes, decode_responses=True)
-            else:
-                # Single Redis instance for development
-                redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-                self.redis_cluster = redis.asyncio.from_url(redis_url, decode_responses=True)
+                for node in redis_nodes:
+                    if ':' in node:
+                        try:
+                            host, port = node.split(':')
+                            startup_nodes.append(ClusterNode(host.strip(), int(port.strip())))
+                        except ValueError as e:
+                            logger.warning(f"Invalid Redis node format '{node}': {e}")
+                            continue
+                
+                if startup_nodes:
+                    self.redis_cluster = redis.asyncio.RedisCluster(
+                        startup_nodes=startup_nodes, 
+                        decode_responses=True,
+                        max_connections=self.config.REDIS_MAX_CONNECTIONS,
+                        socket_timeout=self.config.REDIS_SOCKET_TIMEOUT,
+                        socket_connect_timeout=self.config.REDIS_SOCKET_CONNECT_TIMEOUT,
+                        health_check_interval=self.config.REDIS_HEALTH_CHECK_INTERVAL
+                    )
+                    logger.info(f"Redis cluster mode initialized with {len(startup_nodes)} nodes")
+                else:
+                    logger.warning("No valid Redis cluster nodes found, falling back to single instance")
+                    redis_cluster_env = None
+            
+            if not redis_cluster_env:
+                # Single Redis instance for development or fallback
+                redis_url = os.getenv("REDIS_URL", self.config.REDIS_URL)
+                self.redis_cluster = redis.asyncio.from_url(
+                    redis_url, 
+                    decode_responses=True,
+                    max_connections=self.config.REDIS_MAX_CONNECTIONS,
+                    socket_timeout=self.config.REDIS_SOCKET_TIMEOUT,
+                    socket_connect_timeout=self.config.REDIS_SOCKET_CONNECT_TIMEOUT
+                )
+                logger.info("Single Redis instance initialized")
 
             # ----------------------- Synchronous Engine for ORM -----------------------
             self.sync_engine = create_engine(
                 self.asyncpg_database_url,
                 pool_pre_ping=True,
-                pool_recycle=3600,
-                pool_size=20,
-                max_overflow=40,
-                echo=False  # Disable SQL logging in production
+                pool_recycle=self.config.DB_POOL_RECYCLE,
+                pool_size=self.config.DB_POOL_SIZE,
+                max_overflow=self.config.DB_MAX_OVERFLOW,
+                pool_timeout=self.config.DB_POOL_TIMEOUT,
+                echo=self.config.DEBUG  # Only enable SQL logging in debug mode
             )
             
             self.SessionLocal = sessionmaker(
@@ -147,7 +175,7 @@ class OptimizedDatabaseManager:
             
             # Test Redis
             await self.redis_cluster.ping()
-            logger.info("Redis cluster connection test successful")
+            logger.info("Redis connection test successful")
             
             # Update health status
             self.connection_health = {
@@ -212,7 +240,24 @@ class OptimizedDatabaseManager:
     # ----------------------- FastAPI Dependencies -----------------------
     
     def get_sync_session(self) -> Session:
-        """Return a new synchronous SQLAlchemy session"""
+        """Return a new synchronous SQLAlchemy session.
+        If the synchronous engine has not been created yet (e.g. initialize() was
+        never awaited), create a minimal engine + sessionmaker on-the-fly so that
+        legacy synchronous code and unit tests can still obtain a working session.
+        """
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        if not hasattr(self, "SessionLocal"):
+            # Build a lightweight sync engine using DATABASE_URL
+            raw_database_url = os.getenv("DATABASE_URL", self.config.DATABASE_URL)
+            sync_url = raw_database_url.replace("+asyncpg", "")
+            self.sync_engine = create_engine(
+                sync_url,
+                pool_pre_ping=True,
+                echo=self.config.DEBUG,
+            )
+            self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.sync_engine)
+            logger.warning("SessionLocal was missing – created sync engine lazily. Consider awaiting OptimizedDatabaseManager.initialize() during app startup for full functionality.")
         return self.SessionLocal()
 
     def get_db(self):
@@ -343,7 +388,7 @@ class OptimizedDatabaseManager:
             
             # Cache the result with appropriate TTL
             try:
-                ttl = 300 if '1m' in timeframe else 3600 if '1d' in timeframe else 1800
+                ttl = self.config.get_cache_ttl(timeframe)
                 await self.redis_cluster.setex(cache_key, ttl, df.to_json(orient='index'))
             except Exception as e:
                 logger.warning(f"Failed to cache data: {e}")
@@ -381,7 +426,7 @@ class OptimizedDatabaseManager:
         
         # Cache for 1 hour
         try:
-            await self.redis_cluster.setex(cache_key, 3600, json.dumps(symbols))
+            await self.redis_cluster.setex(cache_key, self.config.CACHE_TTL_SYMBOLS, json.dumps(symbols))
         except Exception as e:
             logger.warning(f"Failed to cache symbols: {e}")
         
