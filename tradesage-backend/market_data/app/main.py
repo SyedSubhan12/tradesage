@@ -11,7 +11,10 @@ from .utils.database import DatabaseManager
 from .routers.v1 import ohlcv, trades, news
 from .schemas.market_data import ErrorResponse
 from .services.redis_optimizer import TradingRedisService
-from .utils.databento_client import databento
+from .utils.databento_client import DatabentoClient
+from .services.data_ingestion import DataIngestionService
+from .utils.database import get_db
+from sqlalchemy import text
 
 
 from fastapi.middleware.cors import CORSMiddleware
@@ -42,15 +45,36 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting TradeSage Market Data API...")
     
-    # Create database tables
     try:
+        # Initialize database and Redis
         await db_manager.initialize()
         logger.info("Database tables created successfully")
         await redis_service.connect()
         logger.info("Redis connection established")
 
+        # Run initial data ingestion
+        logger.info("Starting initial data ingestion...")
+        db_session = next(get_db())
+
+        # TEMPORARY: Clear old incorrect symbol data before ingestion
+        logger.info("Clearing existing symbols table to ensure fresh data...")
+        db_session.execute(text("TRUNCATE TABLE symbols RESTART IDENTITY CASCADE;"))
+        db_session.commit()
+        logger.info("Symbols table cleared.")
+
+        databento_client = DatabentoClient(api_key=settings.DATABENTO_API_KEY)
+        ingestion_service = DataIngestionService(databento_client=databento_client, db=db_session)
+        
+        # Ingest symbols for a default dataset
+        dataset = "GLBX.MDP3" # Example dataset
+        ingested_count = await ingestion_service.ingest_symbols(dataset)
+        logger.info(f"Initial symbol ingestion complete. Ingested {ingested_count} new symbols for {dataset}.")
+        db_session.close()
+
     except Exception as e:
-        logger.error(f"Failed to create database tables: {e}")
+        logger.error(f"An error occurred during startup: {e}")
+        # Depending on the severity, you might want to re-raise the exception
+        # to prevent the application from starting in a broken state.
         raise
     
     yield

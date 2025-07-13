@@ -208,10 +208,22 @@ async function logoutUser(refreshTokenValue) {
   const response = await callApi('/auth/logout', 'POST', null, refreshTokenValue);
   updateResponseStatus('tokenStatus', response.data);
 
-  if (response.status === 200) {
-    sessionStorage.removeItem('auth_token');
-    sessionStorage.removeItem('refresh_token');
-    document.getElementById('currentToken').textContent = 'No token';
+  // Always treat as logout, regardless of backend deletion result
+  sessionStorage.removeItem('auth_token');
+  sessionStorage.removeItem('refresh_token');
+  document.getElementById('currentToken').textContent = 'No token';
+
+  // Log and optionally display reason if token deletion failed
+  if (response.data && response.data.refresh_token_deletion_result === false) {
+    logOperation('Logout: Refresh token deletion not successful', {
+      reason: response.data.refresh_token_deletion_reason || 'unknown'
+    });
+    // Optionally display this in the UI (e.g., status element)
+    updateResponseStatus('tokenStatus', {
+      ...response.data,
+      info: `Refresh token deletion not successful: ${response.data.refresh_token_deletion_reason || 'unknown'}`
+    }, false);
+  } else {
     logOperation('Logout Success', 'Tokens cleared');
   }
 

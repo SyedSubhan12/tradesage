@@ -1,6 +1,6 @@
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator, ConfigDict
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from decimal import Decimal
 
 class SymbolBase(BaseModel):
@@ -8,48 +8,88 @@ class SymbolBase(BaseModel):
     dataset: str = Field(..., min_length=1, max_length=50)
     description: Optional[str] = None
     sector: Optional[str] = None
+    industry: Optional[str] = None  # Added missing field
     market_cap: Optional[int] = None
+    currency: Optional[str] = Field(default="USD", max_length=3)  # Added missing field
+    exchange: Optional[str] = None  # Added missing field
 
 class SymbolCreate(SymbolBase):
-    pass
+    # These fields are required for creation but optional in base
+    currency: str = Field(default="USD", max_length=3)
+    exchange: str = Field(..., min_length=1, max_length=50)
+    industry: str = Field(default="Unknown", max_length=100)
+    
+    # Optional fields for creation
+    instrument_id: Optional[int] = None
+    is_active: bool = Field(default=True)
+    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 class SymbolResponse(SymbolBase):
     id: int
     instrument_id: Optional[int] = None
+    is_active: bool = True
+    metadata: Optional[Dict[str, Any]] = None
     created_at: datetime
     updated_at: datetime
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class OHLCVBase(BaseModel):
-    symbol: str = Field(..., min_length=1, max_length=20)
-    dataset: str = Field(..., min_length=1, max_length=50)
-    timeframe: str = Field(..., pattern=r'^ohlcv-(1s|1m|5m|15m|30m|1h|4h|1d|1w|1M)$')
     timestamp: datetime
+    timeframe: str = Field(..., pattern=r'^ohlcv-(1s|1m|5m|15m|30m|1h|4h|1d|1w|1M)$')
     open: Optional[Decimal] = Field(None, ge=0)
     high: Optional[Decimal] = Field(None, ge=0)
     low: Optional[Decimal] = Field(None, ge=0)
     close: Optional[Decimal] = Field(None, ge=0)
     volume: Optional[int] = Field(None, ge=0)
     vwap: Optional[Decimal] = Field(None, ge=0)
-    trades_count: Optional[int] = Field(None, ge=0)
+    trade_count: Optional[int] = Field(None, ge=0)  # Fixed: was trades_count
 
 class OHLCVCreate(OHLCVBase):
-    @validator('high', 'low', 'close')
-    def validate_prices(cls, v, values):
-        if 'open' in values and values['open'] and v:
+    symbol_id: int  # Added missing field - this is the foreign key
+    
+    @field_validator('high', 'low', 'close')
+    @classmethod
+    def validate_prices(cls, v, info):
+        if info.data.get('open') and v:
+            open_price = info.data['open']
             # Basic validation: prices should be reasonable relative to open
-            if v > values['open'] * 10 or v < values['open'] * 0.1:
+            if v > open_price * 10 or v < open_price * 0.1:
                 raise ValueError('Price seems unreasonable compared to open price')
         return v
 
 class OHLCVResponse(OHLCVBase):
     id: int
+    symbol_id: int
+    symbol: Optional[str] = None  # Can be populated via join
+    dataset: Optional[str] = None  # Can be populated via join
     created_at: datetime
+    updated_at: Optional[datetime] = None
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
+
+# Alternative OHLCV schema for input with symbol name instead of ID
+class OHLCVCreateWithSymbol(BaseModel):
+    symbol: str = Field(..., min_length=1, max_length=20)
+    dataset: str = Field(..., min_length=1, max_length=50)
+    timestamp: datetime
+    timeframe: str = Field(..., pattern=r'^ohlcv-(1s|1m|5m|15m|30m|1h|4h|1d|1w|1M)$')
+    open: Optional[Decimal] = Field(None, ge=0)
+    high: Optional[Decimal] = Field(None, ge=0)
+    low: Optional[Decimal] = Field(None, ge=0)
+    close: Optional[Decimal] = Field(None, ge=0)
+    volume: Optional[int] = Field(None, ge=0)
+    vwap: Optional[Decimal] = Field(None, ge=0)
+    trade_count: Optional[int] = Field(None, ge=0)
+    
+    @field_validator('high', 'low', 'close')
+    @classmethod
+    def validate_prices(cls, v, info):
+        if info.data.get('open') and v:
+            open_price = info.data['open']
+            if v > open_price * 10 or v < open_price * 0.1:
+                raise ValueError('Price seems unreasonable compared to open price')
+        return v
 
 class TradeBase(BaseModel):
     symbol: str = Field(..., min_length=1, max_length=20)
@@ -67,8 +107,7 @@ class TradeResponse(TradeBase):
     id: int
     created_at: datetime
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class NewsBase(BaseModel):
     symbol: Optional[str] = None
@@ -86,8 +125,7 @@ class NewsResponse(NewsBase):
     id: int
     created_at: datetime
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # Query Schemas
 class OHLCVQuery(BaseModel):
@@ -126,3 +164,18 @@ class ErrorResponse(BaseModel):
     message: str
     error_code: Optional[str] = None
     details: Optional[dict] = None
+
+# Bulk operation schemas
+class BulkSymbolCreate(BaseModel):
+    symbols: List[SymbolCreate]
+
+class BulkOHLCVCreate(BaseModel):
+    ohlcv_data: List[OHLCVCreateWithSymbol]
+
+class BulkResponse(BaseModel):
+    success: bool = True
+    message: str = "Success"
+    total_items: int
+    successful_items: int
+    failed_items: int
+    errors: Optional[List[str]] = None

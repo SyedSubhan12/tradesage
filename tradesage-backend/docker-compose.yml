@@ -184,25 +184,23 @@ services:
   #   restart: unless-stopped
 
   # # Market Data Service (placeholder)
-  # market-data-service:
-  #   build:
-  #     context: .
-  #     dockerfile: ./market-data-service/Dockerfile
-  #   container_name: tradesage-market-data
-  #   ports:
-  #     - "8005:8005"
-  #   environment:
-  #     DATABASE_URL: postgresql+asyncpg://tradesage_user:tradesage_password@postgres:5432/tradesage
-  #     REDIS_URL: redis://redis:6379/0
-  #     ENVIRONMENT: production
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #     redis:
-  #       condition: service_healthy
-  #   networks:
-  #     - tradesage-network
-  #   restart: unless-stopped
+  market-data-service:
+    build:
+      context: .
+      dockerfile: ./market_data/Dockerfile
+    container_name: tradesage-market-data
+    ports:
+      - "8005:8005"
+    environment:
+      POSTGRES_URL: *db-url
+      REDIS_URL: redis://redis:6379/0
+      ENVIRONMENT: production
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - tradesage-network
+    restart: unless-stopped
 
   # # Analytics Service (placeholder)
   # analytics-service:

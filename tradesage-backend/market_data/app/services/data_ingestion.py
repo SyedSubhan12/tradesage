@@ -69,7 +69,7 @@ class DataIngestionService:
                 dataset=dataset
             )
             
-                        if df.empty:
+            if df.empty:
                 logger.warning(f"No data received for {symbols} in {timeframe}")
                 return 0
 
@@ -150,7 +150,7 @@ class DataIngestionService:
                 dataset=dataset
             )
             
-                        if df.empty:
+            if df.empty:
                 logger.warning(f"No trade data received for {symbols}")
                 return 0
 

@@ -25,6 +25,7 @@ from starlette_prometheus import metrics, PrometheusMiddleware
 from common.config import settings
 from contextlib import asynccontextmanager
 from common.database import db_manager
+from auth_service.database.db_manager import log_pool_status
 from common.redis_client import redis_manager
 from common.logging_config import setup_logging
 from common.rate_limiter import rate_limiter, get_rate_limit
@@ -112,6 +113,21 @@ async def lifespan(app: FastAPI):
 # ================================
 # FASTAPI APP SETUP
 # ================================
+
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class PoolLoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        from common.config import settings
+        if getattr(settings, 'debug', False) or getattr(settings, 'environment', None) == 'development':
+            log_pool_status()
+        response = await call_next(request)
+        if getattr(settings, 'debug', False) or getattr(settings, 'environment', None) == 'development':
+            log_pool_status()
+        return response
+
+app = FastAPI(lifespan=lifespan)
+app.add_middleware(PoolLoggingMiddleware)
 app = FastAPI(
     title="Tradesage Auth Service",
     description="Authentication and authorization service for Tradesage",

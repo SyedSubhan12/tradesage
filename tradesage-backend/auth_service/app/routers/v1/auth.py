@@ -233,29 +233,28 @@ async def store_refresh_token_securely(session_id: str, refresh_token: str, expi
         # Could implement metrics for Redis failures
         return False
 
-async def delete_refresh_token_securely(session_id: str) -> bool:
-    """Delete refresh token with enhanced monitoring"""
+async def delete_refresh_token_securely(session_id: str) -> dict:
+    """Delete refresh token with enhanced monitoring and detailed reason"""
     context_logger = logger.bind(session_id=session_id, operation="delete_refresh_token")
-    
     try:
         context_logger.debug("Deleting refresh token")
         redis_client = await redis_manager.get_redis()
-        
         if not redis_client:
             context_logger.warning("Redis client unavailable for token deletion")
-            return False
-        
+            return {"success": False, "reason": "redis_unavailable"}
         result = await redis_client.delete(f"refresh_token:{session_id}")
-        context_logger.info("Refresh token deletion completed", deletion_result=bool(result))
-        return bool(result)
-        
+        if result == 0:
+            context_logger.info("Refresh token not found or already deleted", deletion_result=False)
+            return {"success": False, "reason": "not_found_or_already_deleted"}
+        context_logger.info("Refresh token deletion completed", deletion_result=True)
+        return {"success": True, "reason": "deleted"}
     except Exception as e:
         context_logger.error(
             "Failed to delete refresh token",
             error=str(e),
             traceback=traceback.format_exc()
         )
-        return False
+        return {"success": False, "reason": "exception", "error": str(e)}
 
 async def invalidate_user_sessions(user_id: str, current_session_id: str = None) -> bool:
     """Invalidate user sessions with comprehensive monitoring"""
@@ -1650,17 +1649,25 @@ async def logout(
                     context_logger.warning("Failed to extract session info from token", error=str(e))
 
             # Revoke session and refresh token if we have a session ID
+            refresh_token_deletion_result = None
+            refresh_token_deletion_reason = None
             if session_id_to_revoke:
                 try:
                     revoke_success = await session_service_client.terminate_session(session_id_to_revoke)
                     if revoke_success:
-                        await delete_refresh_token_securely(session_id_to_revoke)
-                        context_logger.debug("Session and refresh token revoked successfully")
+                        deletion_result = await delete_refresh_token_securely(session_id_to_revoke)
+                        refresh_token_deletion_result = deletion_result.get("success", False)
+                        refresh_token_deletion_reason = deletion_result.get("reason", "unknown")
+                        context_logger.debug("Session and refresh token revoked", refresh_token_deletion_result=refresh_token_deletion_result, refresh_token_deletion_reason=refresh_token_deletion_reason)
                         active_sessions.dec()  # Update metrics
                     else:
                         context_logger.warning("Failed to terminate session during logout")
+                        refresh_token_deletion_result = False
+                        refresh_token_deletion_reason = "session_termination_failed"
                 except Exception as e:
                     context_logger.error("Error revoking session", error=str(e))
+                    refresh_token_deletion_result = False
+                    refresh_token_deletion_reason = "exception"
 
             # Audit logging if we have user information
             if user_id_for_audit:
@@ -1679,7 +1686,15 @@ async def logout(
 
             # Always clear refresh token cookie
             response.delete_cookie(key="refresh_token", path="/auth")
-            
+
+            # Structured response for client handling
+            return {
+                "logout": True,
+                "refresh_token_deletion_result": refresh_token_deletion_result,
+                "refresh_token_deletion_reason": refresh_token_deletion_reason,
+                "authenticated": bool(current_user)
+            }
+           
             auth_requests_total.labels(endpoint='logout', method='POST', status='success').inc()
             
             context_logger.info(
