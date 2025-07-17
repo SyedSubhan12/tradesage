@@ -303,101 +303,126 @@ class DatabentoClient:
         
         return True
 
-    def get_ohlcv_data(self, symbols: List[str], timeframe: str, start_date: str, 
-                      end_date: str, dataset: str) -> pd.DataFrame:
-        """Enhanced OHLCV data retrieval with error handling"""
-        try:
-            if not self.client:
-                logger.error("Databento client not initialized")
-                return pd.DataFrame()
-            
-            if not symbols:
-                logger.warning("No symbols provided for OHLCV data")
-                return pd.DataFrame()
-            
-            # Adjust end_date to prevent requesting data beyond available range
-            from datetime import datetime, timedelta
-            try:
-                end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
-                current_dt = datetime.now(end_dt.tzinfo)
-                if end_dt > current_dt:
-                    end_dt = current_dt - timedelta(days=1)
-                    end_date = end_dt.isoformat()
-                    logger.info(f"Adjusted end_date to {end_date} as it was beyond current date")
-                # Further adjust to ensure it's not beyond the dataset's available range
-                # Use a more conservative approach by setting the end date to the previous day
-                dataset_end_dt = current_dt.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=2)
-                if end_dt > dataset_end_dt:
-                    end_dt = dataset_end_dt
-                    end_date = end_dt.isoformat()
-                    logger.info(f"Further adjusted end_date to {end_date} to ensure it is within dataset availability")
-            except ValueError as e:
-                logger.error(f"Invalid date format for end_date: {e}")
-                return pd.DataFrame()
-            
-            logger.debug(f"Fetching OHLCV data: {len(symbols)} symbols, {timeframe}, {start_date} to {end_date}")
-            
-            # Limit symbols to prevent API overload
-            if len(symbols) > 50:
-                symbols = symbols[:50]
-                logger.warning(f"Limited symbol request to 50 symbols")
-            
-            # Get data with retries
-            for attempt in range(3):
-                try:
-                    data = self.client.timeseries.get_range(
-                        dataset=dataset,
-                        symbols=symbols,
-                        schema=timeframe,
-                        start=start_date,
-                        end=end_date,
-                        limit=10000  # Reasonable limit
-                    )
-                    
-                    df = data.to_df()
-                    
-                    if not df.empty:
-                        # Add metadata columns
-                        df['dataset'] = dataset
-                        df['timeframe'] = timeframe
-                        
-                        # Ensure proper data types
-                        numeric_columns = ['open', 'high', 'low', 'close', 'volume']
-                        for col in numeric_columns:
-                            if col in df.columns:
-                                df[col] = pd.to_numeric(df[col], errors='coerce')
-                        
-                        logger.info(f"Retrieved {len(df)} OHLCV records for {len(symbols)} symbols")
-                        return df
-                    else:
-                        logger.warning(f"No data returned for symbols: {symbols[:5]}...")
-                    
-                    break
-                    
-                except Exception as e:
-                    error_msg = str(e)
-                    logger.warning(f"OHLCV fetch attempt {attempt + 1} failed: {error_msg}")
+    def get_ohlcv_data(
+        self,
+        symbols: List[str],
+        timeframe: str,
+        start_date: str,
+        end_date: str,
+        dataset: str,
+    ) -> pd.DataFrame:
+        """Retrieve OHLCV bars from Databento with robust date-range handling.
 
-                    # Automatically adjust end_date if it is beyond available range
-                    if "data_end_after_available_end" in error_msg and "available_end=" in error_msg:
-                        match = re.search(r"available_end=([0-9]{4}-[0-9]{2}-[0-9]{2})", error_msg)
-                        if match:
-                            new_end = match.group(1)
-                            if new_end != end_date:
-                                logger.info(f"Adjusting end_date from {end_date} to {new_end} and retrying...")
-                                end_date = new_end
-                                continue  # Retry immediately with corrected date
-                    
-                    if attempt < 2:
-                        time.sleep(2 ** attempt)  # Exponential backoff
-                    else:
-                        raise
-            
+        Ensures:
+        • *end_date* never exceeds the dataset's/latest available date.
+        • *start_date* is always **before** *end_date* (shifts back 1 day if necessary).
+        • Retries up to three times, automatically shortening *end_date* if the
+          API responds with an *available_end* hint.
+        """
+        from datetime import datetime, timedelta, timezone
+        import time as _time
+        import re as _re
+
+        # ------------------  Quick sanity checks  ------------------
+        if not self.client:
+            logger.error("Databento client not initialized")
             return pd.DataFrame()
-            
-        except Exception as e:
-            logger.error(f"Error fetching OHLCV data: {e}")
+
+        if not symbols:
+            logger.warning("No symbols provided for OHLCV request")
             return pd.DataFrame()
+
+        # ------------------  Date-range normalisation  --------------
+        try:
+            start_dt = datetime.fromisoformat(start_date.replace("Z", "+00:00"))
+            end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+        except ValueError as err:
+            logger.error(f"Invalid start/end date supplied: {err}")
+            return pd.DataFrame()
+
+        now_dt = datetime.now(end_dt.tzinfo or timezone.utc)
+
+        # Cap end_dt to yesterday if it is in the future
+        if end_dt >= now_dt:
+            end_dt = now_dt - timedelta(days=1)
+
+        # Cap to dataset's available end (if known)
+        ds_end_dt = self.get_dataset_availability(dataset)
+        if ds_end_dt and end_dt > ds_end_dt:
+            end_dt = ds_end_dt
+
+        # Ensure start_dt < end_dt (shift back 1-day if necessary)
+        if start_dt >= end_dt:
+            start_dt = end_dt - timedelta(days=1)
+
+        start_date = start_dt.strftime("%Y-%m-%d")
+        end_date = end_dt.strftime("%Y-%m-%d")
+
+        # Trim symbol list to avoid API overload
+        if len(symbols) > 50:
+            logger.warning("Limiting symbol list to first 50 symbols for single request")
+            symbols = symbols[:50]
+
+        logger.debug(
+            f"Fetching OHLCV ({timeframe}) {start_date} → {end_date} for {len(symbols)} symbols"
+        )
+
+        # ------------------  Fetch with retries  --------------------
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                data = self.client.timeseries.get_range(
+                    dataset=dataset,
+                    symbols=symbols,
+                    schema=timeframe,
+                    start=start_date,
+                    end=end_date,
+                    limit=10000,
+                )
+                df = data.to_df()
+
+                if df.empty:
+                    logger.warning(
+                        f"Attempt {attempt}: no OHLCV rows returned for {symbols[:5]}…"
+                    )
+                else:
+                    df["dataset"] = dataset
+                    df["timeframe"] = timeframe
+                    for col in ["open", "high", "low", "close", "volume"]:
+                        if col in df.columns:
+                            df[col] = pd.to_numeric(df[col], errors="coerce")
+                    logger.info(
+                        f"Retrieved {len(df)} OHLCV rows (attempt {attempt}) for {len(symbols)} symbols"
+                    )
+                    return df
+
+            except Exception as exc:
+                msg = str(exc)
+                logger.warning(f"Attempt {attempt} failed: {msg}")
+
+                # If API hints at available_end, shorten range and retry
+                if "available_end=" in msg:
+                    m = _re.search(r"available_end=([0-9]{4}-[0-9]{2}-[0-9]{2})", msg)
+                    if m:
+                        hinted_end = m.group(1)
+                        if hinted_end != end_date:
+                            end_date = hinted_end
+                            end_dt = datetime.fromisoformat(hinted_end)
+                            if start_dt >= end_dt:
+                                start_dt = end_dt - timedelta(days=1)
+                                start_date = start_dt.strftime("%Y-%m-%d")
+                            logger.info(
+                                f"Shortening end_date to {end_date} per API hint; retrying…"
+                            )
+                            continue
+
+                if attempt < max_attempts:
+                    _time.sleep(2 ** attempt)
+                else:
+                    logger.error("Exhausted retries for OHLCV fetch; returning empty DataFrame")
+                    return pd.DataFrame()
+
+        return pd.DataFrame()
 
     def get_trade_data(self, symbols: List[str], start_date: str, end_date: str, 
                       dataset: str) -> pd.DataFrame:
@@ -504,6 +529,26 @@ class DatabentoClient:
             info['connection_tested'] = self._test_connection()
         
         return info
+
+    def get_dataset_availability(self, dataset: str) -> Optional[datetime]:
+        """Query Databento for the latest available data date for a dataset."""
+        try:
+            if not self.client:
+                logger.error("Databento client not initialized")
+                return None
+            
+            # Use metadata service to get dataset details
+            dataset_info = self.client.metadata.get_dataset_range(dataset=dataset)
+            if dataset_info and hasattr(dataset_info, 'end'):
+                end_date_str = dataset_info.end
+                if end_date_str:
+                    end_dt = datetime.fromisoformat(end_date_str.replace('Z', '+00:00'))
+                    logger.info(f"Dataset {dataset} has data available up to {end_date_str}")
+                    return end_dt
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching dataset availability for {dataset}: {e}")
+            return None
 
 # Standalone testing function
 async def test_databento_setup():

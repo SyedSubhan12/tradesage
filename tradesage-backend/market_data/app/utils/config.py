@@ -5,6 +5,7 @@ import structlog
 import asyncio
 from datetime import datetime, timezone, timedelta
 import os
+import multiprocessing
 from pathlib import Path
 
 class ProductionSettings(BaseSettings):
@@ -21,7 +22,7 @@ class ProductionSettings(BaseSettings):
     
     # API Configuration
     API_V1_STR: str = "/api/v1"
-    PORT: int = Field(default=8005, description="Server port")
+    PORT: int = Field(default=8002, description="Server port")
     
     # ==================== Database Configuration ====================
     # FIXED: Changed to DATABASE_URL to match database.py expectations
@@ -74,15 +75,28 @@ class ProductionSettings(BaseSettings):
         default=["XNAS.ITCH", "XNYS.PILLAR", "XASE.PILLAR", "BATS.PITCH"],
     )
     
-    # Timeframes to collect
-    TIMEFRAMES: List[str] = Field(  
-        default=["ohlcv-1s", "ohlcv-1m", "ohlcv-5m", "ohlcv-15m", "ohlcv-30m", "ohlcv-1h", "ohlcv-4h", "ohlcv-1d"],
+    # Dataset start dates (earliest data availability)
+    DATASET_START_DATES: Dict[str, str] = Field(
+        default={
+            "XNAS.ITCH": "2018-05-01",
+            "OPRA.PILLAR": "2020-01-01",
+            "XNYS.PILLAR": "2018-05-01",
+            "GLBX.MDP3": "2010-01-01",
+            "BATS.PITCH": "2018-05-01",
+            "XASE.PILLAR": "2018-05-01",
+        },
+        description="Earliest available date per dataset"
     )
+    
+    # Timeframes to collect
+    TIMEFRAMES: List[str] = Field(
+         default=["ohlcv-1d"],
+     )
     
     # ==================== Performance Configuration ====================
     # Ingestion settings
     BATCH_SIZE_SYMBOLS: int = Field(default=100, description="Symbol ingestion batch size")
-    BATCH_SIZE_OHLCV: int = Field(default=1000, description="OHLCV ingestion batch size")
+    BATCH_SIZE_OHLCV: int = Field(default=10000, description="OHLCV ingestion batch size")
     BATCH_SIZE_TRADES: int = Field(default=5000, description="Trade ingestion batch size")
     
     # Concurrency limits
@@ -194,6 +208,14 @@ class ProductionSettings(BaseSettings):
     # Background tasks
     ENABLE_BACKGROUND_TASKS: bool = Field(default=True, description="Enable background processing tasks")
     BACKGROUND_TASK_INTERVAL: int = Field(default=300, description="Background task interval in seconds")
+
+    # ==================== Ingestion Schedule Configuration ====================
+    HISTORICAL_START_DATE: str = Field(default="2010-01-01", description="Global historical start date for backfill")
+    INCREMENTAL_UPDATE_CRON: str = Field(default="0 */1 * * *", description="Cron string for incremental updates")
+    SYMBOL_REFRESH_CRON: str = Field(default="0 6 * * *", description="Cron string for symbol refresh")
+    MAINTENANCE_CRON: str = Field(default="0 2 * * 0", description="Cron string for maintenance tasks")
+    MAX_CONCURRENT_DATASETS: int = Field(default=3, description="Max datasets processed concurrently")
+    PAUSE_BETWEEN_DATASETS_SECONDS: int = Field(default=30, description="Pause between dataset ingestion batches")
     
     # ==================== TradingView Configuration ====================
     # TradingView compatibility settings
@@ -370,6 +392,14 @@ class ProductionSettings(BaseSettings):
             self.LOG_LEVEL = "DEBUG"
             self.ENABLE_STARTUP_INGESTION = False
             self.CACHE_TTL_MINUTE = 60  # Shorter cache for development
+        
+        # -------- Dynamic DB pool tuning (CPU aware) --------
+        cpu = multiprocessing.cpu_count()
+        default_pool = max(5, cpu * 2)
+        if self.DB_POOL_SIZE == 20:  # unchanged from default
+            self.DB_POOL_SIZE = default_pool
+        if self.DB_MAX_OVERFLOW == 40:  # unchanged from default
+            self.DB_MAX_OVERFLOW = default_pool
     
     class Config:
         # Always load the .env that sits in the root of the market_data package

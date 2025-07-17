@@ -100,7 +100,9 @@ async def lifespan(app: FastAPI):
     # finally:
     #     db.close()
     # backup_task = asyncio.create_task(start_backup_cycle())
-    logger.info("  Monitoring task started")
+    # Spawn the periodic monitoring coroutine as a background task
+    monitoring_task = asyncio.create_task(periodic_monitoring())
+    logger.info("  Monitoring task started", task_id=id(monitoring_task))
     logger.info("  Backup task will be setup")
     
     # Service startup complete

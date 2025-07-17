@@ -7,10 +7,12 @@ import time
 import logging
 from contextlib import asynccontextmanager
 import asyncio
-from typing import Dict, Any, Set  # ADDED: Set for tracking tasks
+from typing import Dict, Any, Set, Optional
 import uvicorn
 import signal
 import sys
+import os
+from dataclasses import dataclass
 
 from .utils.config import get_settings
 from .utils.database import OptimizedDatabaseManager, get_db_manager
@@ -23,11 +25,17 @@ from .services.data_storage import DataStorageService
 from .utils.databento_client import DatabentoClient
 from .utils.database import get_db
 
-from fastapi.middleware.cors import CORSMiddleware
+# Import the continuous ingestion orchestrator
+from .services.continuous_orchestrator import (
+    ContinuousDataOrchestrator,
+    DatasetConfig,
+    IngestionSchedule
+)
+
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
-from contextlib import asynccontextmanager
 import structlog
 import traceback
+import inspect
 
 # Configure structured logging
 structlog.configure(
@@ -58,16 +66,28 @@ CACHE_HIT_RATE = Gauge('cache_hit_rate', 'Cache hit rate percentage')
 DATABASE_CONNECTIONS = Gauge('database_connections_active', 'Active database connections')
 INGESTION_RATE = Gauge('data_ingestion_records_per_second', 'Data ingestion rate')
 ERROR_RATE = Counter('errors_total', 'Total errors', ['error_type'])
+CONTINUOUS_INGESTION_STATUS = Gauge('continuous_ingestion_active', 'Continuous ingestion process status')
+BACKFILL_PROGRESS = Gauge('historical_backfill_progress', 'Historical backfill progress percentage', ['dataset'])
 
-# FIXED: Global service instances with proper initialization tracking
+@dataclass
+class ServiceContainer:
+    """Container for all application services"""
+    db_manager: Optional[OptimizedDatabaseManager] = None
+    redis_service: Optional[EnhancedTradingRedisService] = None
+    websocket_manager: Optional[TradingViewWebSocketManager] = None
+    data_storage_service: Optional[DataStorageService] = None
+    ingestion_service: Optional[ProductionDataIngestionService] = None
+    continuous_orchestrator: Optional[ContinuousDataOrchestrator] = None
+    background_tasks: Set[asyncio.Task] = None
+    
+    def __post_init__(self):
+        if self.background_tasks is None:
+            self.background_tasks = set()
+
+# Global service container
+services = ServiceContainer()
 settings = get_settings()
-db_manager: OptimizedDatabaseManager = None
-redis_service: EnhancedTradingRedisService = None
-websocket_manager: TradingViewWebSocketManager = None
-data_storage_service: DataStorageService = None
-ingestion_service: ProductionDataIngestionService = None
 
-background_tasks: Set[asyncio.Task] = set()
 class HealthCheckManager:
     """Centralized health check management"""
     
@@ -89,8 +109,6 @@ class HealthCheckManager:
         results = {}
         overall_healthy = True
         
-        import inspect  # added for sync/async check detection
-
         for name, check in self.checks.items():
             try:
                 func = check['func']
@@ -99,6 +117,7 @@ class HealthCheckManager:
                     result = await func()
                 else:
                     result = func()
+                    
                 results[name] = {
                     'status': 'healthy' if result.get('status') in ('ok', 'healthy') else 'unhealthy',
                     'details': result,
@@ -128,168 +147,333 @@ class HealthCheckManager:
 
 health_manager = HealthCheckManager()
 
+class ServiceInitializer:
+    """Handles service initialization and cleanup"""
+    
+    @staticmethod
+    async def initialize_core_services() -> list:
+        """Initialize core services and return list of initialized services"""
+        initialized_services = []
+        
+        try:
+            # 1. Initialize optimized database manager
+            logger.info("📊 Initializing optimized database manager...")
+            services.db_manager = OptimizedDatabaseManager(settings)
+            await services.db_manager.initialize()
+            
+            # Ensure global singleton is set for other modules
+            import app.utils.database as _db_mod
+            _db_mod._db_manager = services.db_manager
+            initialized_services.append('db_manager')
+            logger.info("✅ Database manager initialized")
+            
+            # 2. Initialize enhanced Redis service
+            logger.info("🔄 Initializing enhanced Redis service...")
+            services.redis_service = EnhancedTradingRedisService(settings.REDIS_URL)
+            await services.redis_service.connect()
+            initialized_services.append('redis_service')
+            logger.info("✅ Redis service initialized")
+            
+            # 3. Initialize data storage service
+            logger.info("💾 Initializing data storage service...")
+            db_session = services.db_manager.get_sync_session()
+            services.data_storage_service = DataStorageService(db_session, services.redis_service.redis_client)
+            initialized_services.append('data_storage_service')
+            logger.info("✅ Data storage service initialized")
+            
+            # 4. Initialize WebSocket manager
+            logger.info("🌐 Initializing WebSocket manager...")
+            services.websocket_manager = TradingViewWebSocketManager(services.redis_service, services.data_storage_service)
+            initialized_services.append('websocket_manager')
+            logger.info("✅ WebSocket manager initialized")
+            
+            # 5. Initialize production data ingestion service
+            logger.info("⚡ Initializing production data ingestion service...")
+            databento_client = DatabentoClient()
+            services.ingestion_service = ProductionDataIngestionService(
+                databento_client=databento_client,
+                db_manager=services.db_manager,
+                redis_service=services.redis_service,
+                websocket_manager=services.websocket_manager
+            )
+            await services.ingestion_service.start_background_processing()
+            initialized_services.append('ingestion_service')
+            logger.info("✅ Production data ingestion service initialized")
+            
+            # 6. Initialize continuous data orchestrator
+            if getattr(settings, 'ENABLE_CONTINUOUS_INGESTION', True):
+                logger.info("🔄 Initializing continuous data orchestrator...")
+                # Build dataset configurations from central settings to avoid duplication
+                datasets = [
+                    DatasetConfig(
+                        dataset_code=ds,
+                        timeframes=settings.TIMEFRAMES,
+                        priority=1 if idx < 2 else 2,
+                        update_frequency_minutes=60,
+                        max_symbols_per_batch=settings.BATCH_SIZE_SYMBOLS,
+                        backfill_chunk_days=30,
+                        is_active=True
+                    )
+                    for idx, ds in enumerate(settings.DATASETS)
+                ]
+                schedule_config = IngestionSchedule(
+                    historical_start_date="2010-01-01",
+                    incremental_update_cron="0 */1 * * *",
+                    symbol_refresh_cron="0 6 * * *",
+                    maintenance_cron="0 2 * * 0",
+                    max_concurrent_datasets=3,
+                    pause_between_datasets_seconds=30
+                )
+                
+                services.continuous_orchestrator = ContinuousDataOrchestrator(
+                    ingestion_service=services.ingestion_service,
+                    datasets_config=datasets,
+                    schedule_config=schedule_config
+                )
+                
+                # Start continuous ingestion
+                await services.continuous_orchestrator.start_continuous_ingestion()
+                initialized_services.append('continuous_orchestrator')
+                logger.info("✅ Continuous data orchestrator initialized and started")
+                CONTINUOUS_INGESTION_STATUS.set(1)
+            
+            return initialized_services
+            
+        except Exception as e:
+            logger.error(f"Service initialization failed: {e}")
+            await ServiceInitializer.cleanup_services(initialized_services)
+            raise
+    
+    @staticmethod
+    async def register_health_checks():
+        """Register all health checks"""
+        await health_manager.register_check("database", services.db_manager.health_check, critical=True)
+        await health_manager.register_check("redis", lambda: {"status": "ok"}, critical=True)
+        await health_manager.register_check("websocket", 
+            lambda: {"status": "ok", "connections": len(services.websocket_manager.clients)}, 
+            critical=False)
+        
+        if services.continuous_orchestrator:
+            await health_manager.register_check("continuous_ingestion",
+                lambda: {"status": "ok" if services.continuous_orchestrator.state.is_running else "stopped",
+                        "mode": services.continuous_orchestrator.state.mode.value},
+                critical=False)
+    
+    @staticmethod
+    async def perform_initial_data_loading():
+        """Perform initial data loading if enabled"""
+        if not getattr(settings, 'ENABLE_STARTUP_INGESTION', True):
+            return
+            
+        logger.info("🔄 Starting initial data ingestion...")
+        try:
+            # Ingest symbols for all datasets
+            datasets = settings.DATASETS
+            symbol_results = await services.ingestion_service.ingest_symbols_parallel(datasets)
+            total_symbols = sum(symbol_results.values())
+            logger.info(f"✅ Initial symbol ingestion completed: {total_symbols} symbols")
+            
+            # Warm cache for popular symbols
+            if total_symbols > 0:
+                popular_symbols = getattr(settings, 'CACHE_WARM_SYMBOLS', ['AAPL', 'TSLA', 'MSFT'])
+                await services.redis_service.warm_cache_for_symbols(popular_symbols)
+                logger.info("✅ Cache warmed for popular symbols")
+                
+        except Exception as e:
+            logger.error(f"❌ Initial data ingestion failed: {e}")
+            # Don't fail startup for ingestion errors
+    
+    @staticmethod
+    async def start_background_tasks():
+        """Start background tasks"""
+        # Start background metrics collection
+        task1 = asyncio.create_task(BackgroundTasks.update_metrics_periodically())
+        services.background_tasks.add(task1)
+        
+        # Start background cache cleanup
+        task2 = asyncio.create_task(BackgroundTasks.periodic_cache_cleanup())
+        services.background_tasks.add(task2)
+        
+        # Start continuous ingestion monitoring
+        if services.continuous_orchestrator:
+            task3 = asyncio.create_task(BackgroundTasks.monitor_continuous_ingestion())
+            services.background_tasks.add(task3)
+        
+        logger.info(f"✅ Started {len(services.background_tasks)} background tasks")
+    
+    @staticmethod
+    async def cleanup_services(initialized_services: list):
+        """Cleanup services in reverse order of initialization"""
+        try:
+            # Cancel background tasks first
+            logger.info("🔄 Cancelling background tasks...")
+            for task in services.background_tasks:
+                task.cancel()
+            
+            if services.background_tasks:
+                await asyncio.gather(*services.background_tasks, return_exceptions=True)
+                services.background_tasks.clear()
+                logger.info("✅ Background tasks cancelled")
+            
+            # Stop services in reverse order
+            if 'continuous_orchestrator' in initialized_services and services.continuous_orchestrator:
+                await services.continuous_orchestrator.stop_continuous_ingestion()
+                logger.info("✅ Continuous data orchestrator stopped")
+                CONTINUOUS_INGESTION_STATUS.set(0)
+            
+            if 'ingestion_service' in initialized_services and services.ingestion_service:
+                await services.ingestion_service.close()
+                logger.info("✅ Data ingestion service shutdown complete")
+            
+            if 'websocket_manager' in initialized_services and services.websocket_manager:
+                await services.websocket_manager.shutdown()
+                logger.info("✅ WebSocket manager shutdown")
+            
+            if 'data_storage_service' in initialized_services and services.data_storage_service:
+                if hasattr(services.data_storage_service, 'close'):
+                    services.data_storage_service.close()
+                logger.info("✅ Data storage service closed")
+            
+            if 'redis_service' in initialized_services and services.redis_service:
+                await services.redis_service.redis_client.aclose()
+                logger.info("✅ Redis connections closed")
+            
+            if 'db_manager' in initialized_services and services.db_manager:
+                await services.db_manager.close()
+                logger.info("✅ Database connections closed")
+            
+        except Exception as e:
+            logger.error(f"❌ Shutdown error: {e}")
+
+class BackgroundTasks:
+    """Container for background task functions"""
+    
+    @staticmethod
+    async def update_metrics_periodically():
+        """Background task to update metrics periodically"""
+        while True:
+            try:
+                await asyncio.sleep(30)  # Update every 30 seconds
+                
+                # Update continuous ingestion metrics
+                if services.continuous_orchestrator:
+                    status = services.continuous_orchestrator.get_orchestrator_status()
+                    
+                    # Update progress metrics for each dataset
+                    progress = status.get('progress', {})
+                    for dataset, info in progress.items():
+                        backfill_progress = info.get('backfill_progress', 0)
+                        BACKFILL_PROGRESS.labels(dataset=dataset).set(backfill_progress)
+
+                # Update DB pool utilisation metric
+                if services.db_manager:
+                    pool_stats = services.db_manager.get_connection_stats()
+                    if 'read_pool' in pool_stats:
+                        DATABASE_CONNECTIONS.set(pool_stats['read_pool']['used'])
+                    
+
+                
+            except asyncio.CancelledError:
+                logger.info("Metrics update task cancelled")
+                break
+            except Exception as e:
+                logger.error(f"Metrics update error: {e}")
+                await asyncio.sleep(60)
+    
+    @staticmethod
+    async def periodic_cache_cleanup():
+        """Background task for periodic cache cleanup"""
+        while True:
+            try:
+                await asyncio.sleep(300)  # Clean up every 5 minutes
+                
+                if services.redis_service:
+                    await services.redis_service.cleanup_expired_keys()
+                    logger.debug("Periodic cache cleanup completed")
+                    
+            except asyncio.CancelledError:
+                logger.info("Cache cleanup task cancelled")
+                break
+            except Exception as e:
+                logger.error(f"Cache cleanup error: {e}")
+                await asyncio.sleep(300)
+    
+    @staticmethod
+    async def monitor_continuous_ingestion():
+        """Monitor continuous ingestion process"""
+        while True:
+            try:
+                await asyncio.sleep(60)  # Check every minute
+                
+                if services.continuous_orchestrator:
+                    status = services.continuous_orchestrator.get_orchestrator_status()
+                    
+                    # Log status periodically
+                    if hasattr(BackgroundTasks, '_last_status_log'):
+                        time_since_last = time.time() - BackgroundTasks._last_status_log
+                        if time_since_last > 300:  # Log every 5 minutes
+                            logger.info(f"Continuous ingestion status: {status['state']['mode']}")
+                            BackgroundTasks._last_status_log = time.time()
+                    else:
+                        BackgroundTasks._last_status_log = time.time()
+                    
+                    # Update metrics
+                    CONTINUOUS_INGESTION_STATUS.set(1 if status['state']['is_running'] else 0)
+                    
+            except asyncio.CancelledError:
+                logger.info("Continuous ingestion monitor cancelled")
+                break
+            except Exception as e:
+                logger.error(f"Continuous ingestion monitor error: {e}")
+                await asyncio.sleep(60)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """FIXED: Enhanced application lifespan with comprehensive error handling"""
+    """Enhanced application lifespan with better organization"""
     logger.info("🚀 Starting TradeSage Market Data API (Production Mode)...")
     
-    global db_manager, redis_service, websocket_manager, data_storage_service, ingestion_service, background_tasks
-    
-    # Track what we've initialized for proper cleanup
     initialized_services = []
     
     try:
-        # ----------------------- Initialize Core Services -----------------------
+        # Initialize core services
+        initialized_services = await ServiceInitializer.initialize_core_services()
         
-        # 1. Initialize optimized database manager
-        logger.info("📊 Initializing optimized database manager...")
-        db_manager = OptimizedDatabaseManager(settings)
-        await db_manager.initialize()
-        # Ensure global singleton is set for other modules
-        import app.utils.database as _db_mod
-        _db_mod._db_manager = db_manager
-        initialized_services.append('db_manager')
-        logger.info("✅ Database manager initialized")
+        # Register health checks
+        await ServiceInitializer.register_health_checks()
         
-        # 2. Initialize enhanced Redis service
-        logger.info("🔄 Initializing enhanced Redis service...")
-        redis_service = EnhancedTradingRedisService(settings.REDIS_URL)
-        await redis_service.connect()
-        initialized_services.append('redis_service')
-        logger.info("✅ Redis service initialized")
+        # Perform initial data loading
+        await ServiceInitializer.perform_initial_data_loading()
         
-        # 3. Initialize data storage service
-        logger.info("💾 Initializing data storage service...")
-        db_session = db_manager.get_sync_session()
-        data_storage_service = DataStorageService(db_session, redis_service.redis_client)
-        initialized_services.append('data_storage_service')
-        logger.info("✅ Data storage service initialized")
-        
-        # 4. Initialize WebSocket manager
-        logger.info("🌐 Initializing WebSocket manager...")
-        websocket_manager = TradingViewWebSocketManager(redis_service, data_storage_service)
-        initialized_services.append('websocket_manager')
-        logger.info("✅ WebSocket manager initialized")
-        
-        # 5. Initialize production data ingestion service
-        logger.info("⚡ Initializing production data ingestion service...")
-        databento_client = DatabentoClient()
-        ingestion_service = ProductionDataIngestionService(
-            databento_client=databento_client,
-            db_manager=db_manager,
-            redis_service=redis_service,
-            websocket_manager=websocket_manager
-        )
-        await ingestion_service.start_background_processing()
-        initialized_services.append('ingestion_service')
-        logger.info("✅ Production data ingestion service initialized")
-        
-        # ----------------------- Register Health Checks -----------------------
-        
-        await health_manager.register_check("database", db_manager.health_check, critical=True)
-        await health_manager.register_check("redis", lambda: {"status": "ok"}, critical=True)
-        await health_manager.register_check("websocket", lambda: {"status": "ok", "connections": len(websocket_manager.clients)}, critical=False)
-        
-        # ----------------------- Initial Data Loading -----------------------
-        
-        if settings.ENABLE_STARTUP_INGESTION:
-            logger.info("🔄 Starting initial data ingestion...")
-            try:
-                # Ingest symbols for all datasets
-                symbol_results = await ingestion_service.ingest_symbols_parallel(settings.DATASETS)
-                total_symbols = sum(symbol_results.values())
-                logger.info(f"✅ Initial symbol ingestion completed: {total_symbols} symbols")
-                
-                # Warm cache for popular symbols
-                if total_symbols > 0:
-                    popular_symbols = settings.CACHE_WARM_SYMBOLS
-                    await redis_service.warm_cache_for_symbols(popular_symbols)
-                    logger.info("✅ Cache warmed for popular symbols")
-                
-            except Exception as e:
-                logger.error(f"❌ Initial data ingestion failed: {e}")
-                # Don't fail startup for ingestion errors
-        
-        # ----------------------- Background Tasks (FIXED) -----------------------
-        
-        # Start background metrics collection
-        task1 = asyncio.create_task(update_metrics_periodically())
-        background_tasks.add(task1)
-        
-        # Start background cache cleanup
-        task2 = asyncio.create_task(periodic_cache_cleanup())
-        background_tasks.add(task2)
+        # Start background tasks
+        await ServiceInitializer.start_background_tasks()
         
         logger.info("🎉 TradeSage Market Data API started successfully!")
-        logger.info(f"📊 Database pools: Read={db_manager.read_pool.get_size()}, Write={db_manager.write_pool.get_size()}")
-        logger.info(f"🔄 Redis connections: {redis_service.redis_client}")
+        logger.info(f"📊 Database pools: Read={services.db_manager.read_pool.get_size()}, Write={services.db_manager.write_pool.get_size()}")
+        logger.info(f"🔄 Redis connections: {services.redis_service.redis_client}")
         logger.info(f"🌐 WebSocket manager ready for connections")
+        
+        if services.continuous_orchestrator:
+            logger.info("🔄 Continuous data ingestion is running (2010 → present)")
         
     except Exception as e:
         logger.error(f"💥 Startup failed: {e}")
         logger.error(traceback.format_exc())
-        
-        # FIXED: Cleanup partial initialization
-        await cleanup_services(initialized_services)
+        await ServiceInitializer.cleanup_services(initialized_services)
         raise
     
     # App is running
     yield
     
-    # ----------------------- Shutdown Sequence (FIXED) -----------------------
-    
+    # Shutdown sequence
     logger.info("🛑 Shutting down TradeSage Market Data API...")
-    
-    await cleanup_services(initialized_services)
-    
+    await ServiceInitializer.cleanup_services(initialized_services)
     logger.info("👋 TradeSage Market Data API shutdown complete")
-
-async def cleanup_services(initialized_services: list):
-    """Cleanup services in reverse order of initialization"""
-    
-    try:
-        # Cancel background tasks first
-        logger.info("🔄 Cancelling background tasks...")
-        for task in background_tasks:
-            task.cancel()
-        
-        if background_tasks:
-            await asyncio.gather(*background_tasks, return_exceptions=True)
-            background_tasks.clear()
-            logger.info("✅ Background tasks cancelled")
-        
-        # Stop services in reverse order
-        if 'ingestion_service' in initialized_services and ingestion_service:
-            await ingestion_service.stop_background_processing()
-            logger.info("✅ Data ingestion service stopped")
-        
-        if 'websocket_manager' in initialized_services and websocket_manager:
-            await websocket_manager.shutdown()
-            logger.info("✅ WebSocket manager shutdown")
-        
-        if 'data_storage_service' in initialized_services and data_storage_service:
-            # Close the session that was created during initialization
-            if hasattr(data_storage_service, 'close'):
-                data_storage_service.close()
-            logger.info("✅ Data storage service closed")
-        
-        if 'redis_service' in initialized_services and redis_service:
-            await redis_service.redis_client.aclose()
-            logger.info("✅ Redis connections closed")
-        
-        if 'db_manager' in initialized_services and db_manager:
-            await db_manager.close()
-            logger.info("✅ Database connections closed")
-        
-    except Exception as e:
-        logger.error(f"❌ Shutdown error: {e}")
 
 # Create FastAPI app with enhanced configuration
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
-    description="Production-grade market data API for institutional trading platforms",
+    description="Production-grade market data API with continuous data ingestion from 2010 to present",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -301,9 +485,9 @@ app = FastAPI(
 # CORS middleware with production settings
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS.split(",") if hasattr(settings, 'CORS_ORIGINS') else ["*"],
+    allow_origins=["*"],#getattr(settings, 'CORS_ORIGINS', "*").split(",") if hasattr(settings, 'CORS_ORIGINS') else ["*"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_methods=["*"],#["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
     expose_headers=["X-Process-Time", "X-Request-ID"]
 )
@@ -379,12 +563,11 @@ async def enhanced_request_middleware(request, call_next):
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """FIXED: Enhanced WebSocket endpoint for real-time data"""
+    """Enhanced WebSocket endpoint for real-time data"""
     client_id = None
     
     try:
-        # FIXED: Connect client without passing client_id parameter
-        client_id = await websocket_manager.connect_client(websocket)
+        client_id = await services.websocket_manager.connect_client(websocket)
         WEBSOCKET_CONNECTIONS.inc()
         
         logger.info(f"WebSocket client connected: {client_id}")
@@ -393,7 +576,7 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             try:
                 message = await websocket.receive_text()
-                await websocket_manager.handle_message(client_id, message)
+                await services.websocket_manager.handle_message(client_id, message)
                 
             except WebSocketDisconnect:
                 logger.info(f"WebSocket client disconnected: {client_id}")
@@ -404,7 +587,7 @@ async def websocket_endpoint(websocket: WebSocket):
         
     finally:
         if client_id:
-            await websocket_manager.disconnect_client(client_id)
+            await services.websocket_manager.disconnect_client(client_id)
             WEBSOCKET_CONNECTIONS.dec()
 
 # ----------------------- Include Enhanced Routers -----------------------
@@ -413,18 +596,76 @@ app.include_router(ohlcv.router, prefix=settings.API_V1_STR, tags=["OHLCV Data"]
 app.include_router(trades.router, prefix=settings.API_V1_STR, tags=["Trade Data"])
 app.include_router(news.router, prefix=settings.API_V1_STR, tags=["News Data"])
 
+# ----------------------- Continuous Ingestion Control Endpoints -----------------------
+
+@app.get("/api/v1/ingestion/status")
+async def get_ingestion_status():
+    """Get comprehensive ingestion status including continuous orchestrator"""
+    try:
+        base_stats = services.ingestion_service.get_ingestion_stats()
+        
+        if services.continuous_orchestrator:
+            orchestrator_status = services.continuous_orchestrator.get_orchestrator_status()
+            return {
+                "ingestion_service": base_stats,
+                "continuous_orchestrator": orchestrator_status,
+                "combined_status": {
+                    "is_running": orchestrator_status['state']['is_running'],
+                    "mode": orchestrator_status['state']['mode'],
+                    "total_records_ingested": base_stats['metrics']['ohlcv_records_ingested'],
+                    "datasets_processed": len(orchestrator_status['state']['active_datasets']),
+                    "historical_backfill_progress": orchestrator_status['progress']
+                }
+            }
+        else:
+            return {"ingestion_service": base_stats}
+            
+    except Exception as e:
+        logger.error(f"Error getting ingestion status: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve ingestion status")
+
+@app.post("/api/v1/ingestion/start")
+async def start_ingestion():
+    """Start continuous data ingestion (if not already running)"""
+    try:
+        if services.continuous_orchestrator and not services.continuous_orchestrator.state.is_running:
+            await services.continuous_orchestrator.start_continuous_ingestion()
+            CONTINUOUS_INGESTION_STATUS.set(1)
+            return {"message": "Continuous data ingestion started", "status": "running"}
+        else:
+            return {"message": "Continuous data ingestion is already running", "status": "running"}
+            
+    except Exception as e:
+        logger.error(f"Error starting ingestion: {e}")
+        raise HTTPException(status_code=500, detail="Failed to start ingestion")
+
+@app.post("/api/v1/ingestion/stop")
+async def stop_ingestion():
+    """Stop continuous data ingestion"""
+    try:
+        if services.continuous_orchestrator and services.continuous_orchestrator.state.is_running:
+            await services.continuous_orchestrator.stop_continuous_ingestion()
+            CONTINUOUS_INGESTION_STATUS.set(0)
+            return {"message": "Continuous data ingestion stopped", "status": "stopped"}
+        else:
+            return {"message": "Continuous data ingestion is not running", "status": "stopped"}
+            
+    except Exception as e:
+        logger.error(f"Error stopping ingestion: {e}")
+        raise HTTPException(status_code=500, detail="Failed to stop ingestion")
+
 # ----------------------- TradingView Compatible Endpoints -----------------------
 
 @app.get("/api/v1/tradingview/config")
 async def tradingview_config():
     """TradingView configuration endpoint"""
     return {
-        "supported_resolutions": settings.TRADINGVIEW_SUPPORTED_RESOLUTIONS,
+        "supported_resolutions": getattr(settings, 'TRADINGVIEW_SUPPORTED_RESOLUTIONS', ["1", "5", "15", "30", "60", "240", "1D"]),
         "supports_group_request": False,
         "supports_marks": False,
         "supports_search": True,
         "supports_timescale_marks": False,
-        "exchanges": settings.TRADINGVIEW_EXCHANGES,
+        "exchanges": getattr(settings, 'TRADINGVIEW_EXCHANGES', ["NASDAQ", "NYSE"]),
         "symbols_types": [
             {"name": "Stock", "value": "stock"}
         ],
@@ -436,7 +677,7 @@ async def tradingview_symbol_search(symbol: str):
     """TradingView symbol search endpoint"""
     try:
         # Search for symbols matching the query
-        symbols = await data_storage_service.get_symbols()
+        symbols = await services.data_storage_service.get_symbols()
         
         matching_symbols = [s for s in symbols if symbol.upper() in s.upper()][:10]
         
@@ -489,7 +730,7 @@ async def tradingview_history(
         end_date = datetime.fromtimestamp(to_timestamp, tz=timezone.utc)
         
         # Get data from storage service
-        df = data_storage_service.get_ohlcv_data(symbol, timeframe, start_date, end_date)
+        df = services.data_storage_service.get_ohlcv_data(symbol, timeframe, start_date, end_date)
         
         if df.empty:
             return {"s": "no_data"}
@@ -540,14 +781,14 @@ async def readiness_check():
     """Kubernetes readiness probe"""
     try:
         # Quick check of critical services
-        if not db_manager or not redis_service:
+        if not services.db_manager or not services.redis_service:
             return JSONResponse(
                 status_code=503,
                 content={"ready": False, "reason": "Services not initialized"}
             )
         
         # Test database connection
-        health_result = await db_manager.health_check()
+        health_result = await services.db_manager.health_check()
         if health_result['status'] != 'healthy':
             return JSONResponse(
                 status_code=503,
@@ -569,16 +810,16 @@ async def liveness_check():
 
 @app.get("/metrics")
 async def prometheus_metrics():
-    """Prometheus metrics endpoint"""
+    """Enhanced Prometheus metrics endpoint"""
     try:
         # Update dynamic metrics
-        if db_manager:
-            stats = db_manager.get_connection_stats()
+        if services.db_manager:
+            stats = services.db_manager.get_connection_stats()
             if 'read_pool' in stats:
                 DATABASE_CONNECTIONS.set(stats['read_pool'].get('size', 0))
         
-        if redis_service:
-            cache_stats = redis_service.get_comprehensive_stats()
+        if services.redis_service:
+            cache_stats = services.redis_service.get_comprehensive_stats()
             l1_stats = cache_stats.get('l1_caches', {})
             
             # Calculate overall hit rate
@@ -592,12 +833,12 @@ async def prometheus_metrics():
                 hit_rate = (total_hits / total_requests) * 100
                 CACHE_HIT_RATE.set(hit_rate)
         
-        if websocket_manager:
-            ws_stats = websocket_manager.get_stats()
+        if services.websocket_manager:
+            ws_stats = services.websocket_manager.get_stats()
             WEBSOCKET_CONNECTIONS.set(ws_stats.get('active_clients', 0))
         
-        if ingestion_service:
-            ingestion_stats = ingestion_service.get_ingestion_stats()
+        if services.ingestion_service:
+            ingestion_stats = services.ingestion_service.get_ingestion_stats()
             throughput = ingestion_stats.get('metrics', {}).get('throughput_rps', 0)
             INGESTION_RATE.set(throughput)
         
@@ -615,7 +856,7 @@ async def prometheus_metrics():
 @app.get("/admin/stats")
 async def admin_stats():
     """Administrative statistics endpoint"""
-    if not settings.DEBUG:
+    if not getattr(settings, 'DEBUG', False):
         raise HTTPException(status_code=404, detail="Not found")
     
     try:
@@ -625,17 +866,20 @@ async def admin_stats():
             "services": {}
         }
         
-        if db_manager:
-            stats["services"]["database"] = db_manager.get_connection_stats()
+        if services.db_manager:
+            stats["services"]["database"] = services.db_manager.get_connection_stats()
         
-        if redis_service:
-            stats["services"]["redis"] = redis_service.get_comprehensive_stats()
+        if services.redis_service:
+            stats["services"]["redis"] = services.redis_service.get_comprehensive_stats()
         
-        if websocket_manager:
-            stats["services"]["websocket"] = websocket_manager.get_stats()
+        if services.websocket_manager:
+            stats["services"]["websocket"] = services.websocket_manager.get_stats()
         
-        if ingestion_service:
-            stats["services"]["ingestion"] = ingestion_service.get_ingestion_stats()
+        if services.ingestion_service:
+            stats["services"]["ingestion"] = services.ingestion_service.get_ingestion_stats()
+        
+        if services.continuous_orchestrator:
+            stats["services"]["continuous_orchestrator"] = services.continuous_orchestrator.get_orchestrator_status()
         
         return stats
         
@@ -646,11 +890,11 @@ async def admin_stats():
 @app.post("/admin/cache/invalidate")
 async def admin_invalidate_cache(pattern: str = "*"):
     """Administrative cache invalidation endpoint"""
-    if not settings.DEBUG:
+    if not getattr(settings, 'DEBUG', False):
         raise HTTPException(status_code=404, detail="Not found")
     
     try:
-        await redis_service.invalidate_pattern(pattern)
+        await services.redis_service.invalidate_pattern(pattern)
         return {"message": f"Cache invalidated for pattern: {pattern}"}
         
     except Exception as e:
@@ -677,7 +921,7 @@ async def global_exception_handler(request, exc):
     ERROR_RATE.labels(error_type=type(exc).__name__).inc()
     
     # Return different responses based on environment
-    if settings.DEBUG:
+    if getattr(settings, 'DEBUG', False):
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content=ErrorResponse(
@@ -712,65 +956,44 @@ async def http_exception_handler(request, exc):
         content={"message": exc.detail, "status_code": exc.status_code}
     )
 
-# ----------------------- Background Tasks (FIXED) -----------------------
-
-async def update_metrics_periodically():
-    """Background task to update metrics periodically"""
-    while True:
-        try:
-            # Update metrics every 30 seconds
-            await asyncio.sleep(30)
-            
-            # This function body would be populated with actual metric updates
-            # The individual metrics are updated in the /metrics endpoint
-            
-        except asyncio.CancelledError:
-            logger.info("Metrics update task cancelled")
-            break
-        except Exception as e:
-            logger.error(f"Metrics update error: {e}")
-            await asyncio.sleep(60)
-
-async def periodic_cache_cleanup():
-    """Background task for periodic cache cleanup"""
-    while True:
-        try:
-            # Clean up every 5 minutes
-            await asyncio.sleep(300)
-            
-            if redis_service:
-                await redis_service.cleanup_expired_keys()
-                logger.debug("Periodic cache cleanup completed")
-                
-        except asyncio.CancelledError:
-            logger.info("Cache cleanup task cancelled")
-            break
-        except Exception as e:
-            logger.error(f"Cache cleanup error: {e}")
-            await asyncio.sleep(300)
-
 # ----------------------- Root Endpoint -----------------------
 
 @app.get("/")
 async def root():
     """Enhanced root endpoint with service information"""
+    continuous_status = None
+    if services.continuous_orchestrator:
+        orchestrator_status = services.continuous_orchestrator.get_orchestrator_status()
+        continuous_status = {
+            "is_running": orchestrator_status['state']['is_running'],
+            "mode": orchestrator_status['state']['mode'],
+            "datasets_processing": len(orchestrator_status['state']['active_datasets'])
+        }
+    
     return {
         "service": settings.APP_NAME,
         "version": settings.APP_VERSION,
         "status": "operational",
         "timestamp": time.time(),
+        "continuous_ingestion": continuous_status,
         "endpoints": {
             "health": "/health",
             "metrics": "/metrics",
-            "docs": "/docs", #if settings.DEBUG else None,
+            "docs": "/docs",
             "websocket": "/ws",
-            "api": settings.API_V1_STR
+            "api": settings.API_V1_STR,
+            "ingestion_status": "/api/v1/ingestion/status",
+            "ingestion_control": {
+                "start": "/api/v1/ingestion/start",
+                "stop": "/api/v1/ingestion/stop"
+            }
         },
         "features": [
             "Real-time WebSocket feeds",
             "TradingView integration", 
             "Multi-tier caching",
             "Prometheus metrics",
+            "Continuous data ingestion (2010-present)",
             "Production-grade performance"
         ]
     }
@@ -780,7 +1003,6 @@ async def root():
 def signal_handler(signum, frame):
     """Handle shutdown signals gracefully"""
     logger.info(f"Received signal {signum}, initiating graceful shutdown...")
-    # The lifespan context manager will handle the actual cleanup
     sys.exit(0)
 
 # Register signal handlers
@@ -820,8 +1042,8 @@ if __name__ == "__main__":
     uvicorn.run(
         "app.main:app",
         host="0.0.0.0",
-        port=settings.PORT if hasattr(settings, 'PORT') else 8005,
-        reload=settings.DEBUG,
+        port=getattr(settings, 'PORT', 8005),
+        reload=getattr(settings, 'DEBUG', False),
         log_config=log_config,
         access_log=True,
         loop="uvloop",  # High-performance event loop
