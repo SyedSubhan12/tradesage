@@ -383,15 +383,6 @@ async def get_ohlcv_data(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Start date must be before end date"
             )
-        
-        # Limit date range for performance
-        max_days = 365 if timeframe == 'ohlcv-1d' else 30
-        if (end_date - start_date).days > max_days:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Date range cannot exceed {max_days} days for {timeframe}"
-            )
-        
         # Get data using storage service with fallback
         try:
             # Try enhanced method first
@@ -420,9 +411,6 @@ async def get_ohlcv_data(
                 dataset=dataset
             )
             
-            if limit and not df.empty:
-                df = df.tail(limit)
-        
         if df.empty:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -676,14 +664,7 @@ async def tradingview_history(
     try:
         # Convert TradingView resolution to our timeframe format
         resolution_map = {
-            "1": "ohlcv-1m",
-            "5": "ohlcv-5m",
-            "15": "ohlcv-15m",
-            "30": "ohlcv-30m",
-            "60": "ohlcv-1h",
-            "240": "ohlcv-4h",
-            "1D": "ohlcv-1d",
-            "1W": "ohlcv-1w"
+            "1D": "ohlcv-1d",        
         }
         
         timeframe = resolution_map.get(resolution)
@@ -886,9 +867,6 @@ async def warm_related_timeframes(symbol: str, requested_timeframe: str,
     try:
         # Define related timeframes to warm
         timeframe_groups = {
-            'ohlcv-1m': ['ohlcv-5m', 'ohlcv-15m'],
-            'ohlcv-5m': ['ohlcv-1m', 'ohlcv-15m', 'ohlcv-30m'],
-            'ohlcv-1h': ['ohlcv-30m', 'ohlcv-4h'],
             'ohlcv-1d': ['ohlcv-4h', 'ohlcv-1w']
         }
         

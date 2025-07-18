@@ -180,7 +180,26 @@ class ContinuousDataOrchestrator:
                 continue
                 
             try:
-                start_date = self.dataset_start_dates.get(dataset_code, '2010-01-01')
+                # Determine real start_date: the first *missing* day after the latest bar
+                start_date_cfg = self.dataset_start_dates.get(dataset_code, '2010-01-01')
+                # Inspect DB to find latest ingested bar across timeframes
+                latest_dates = []
+                for tf in dataset_config.timeframes:
+                    ts = await self.ingestion_service.get_latest_dataset_ohlcv_date(dataset_code, tf)
+                    if ts:
+                        latest_dates.append(ts.date())
+                if latest_dates:
+                    # +1 day after max timestamp present
+                    calc_start_dt = max(latest_dates) + timedelta(days=1)
+                    start_date = max(calc_start_dt.strftime('%Y-%m-%d'), start_date_cfg)
+                else:
+                    start_date = start_date_cfg
+                # If nothing to backfill, continue
+                if datetime.strptime(start_date, '%Y-%m-%d') > datetime.strptime(yesterday, '%Y-%m-%d'):
+                    logger.info(f"{dataset_code} already backfilled up to {yesterday}. Skipping historical phase.")
+                    dataset_config.backfill_completed = True
+                    self.state.completed_datasets.add(dataset_code)
+                    continue
                 logger.info(f"Starting historical backfill for {dataset_code} ({start_date} to {yesterday})")
                 
                 # Get symbols using the ingestion service method
@@ -385,15 +404,34 @@ class ContinuousDataOrchestrator:
         if not symbols:
             return
         
-        # Update only the most recent daily bar (skip weekends)
-        # Use yesterday as end_date to avoid partial current-day bars
-        end_dt = datetime.now() - timedelta(days=1)
-        # Skip weekends – roll back to last weekday (Mon-Fri)
+        # Determine the date range that is *not yet* present in the database.
+        end_dt = datetime.now(timezone.utc) - timedelta(days=1)
+        # Roll back to last weekday (Mon-Fri) if yesterday was weekend
         while end_dt.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
             end_dt -= timedelta(days=1)
-        start_dt = end_dt  # single-day pull
-        end_date = end_dt.strftime('%Y-%m-%d')
-        start_date = start_dt.strftime('%Y-%m-%d')
+
+        # Compute the earliest date we still need, based on DB contents
+        start_dt = None
+        for tf in dataset_config.timeframes:
+            latest_ts = await self.ingestion_service.get_latest_dataset_ohlcv_date(
+                dataset_config.dataset_code, tf
+            )
+            if latest_ts:
+                candidate = latest_ts.date() + timedelta(days=1)
+            else:
+                candidate = end_dt.date()  # If no data, just pull yesterday
+            # Keep the *earliest* candidate across timeframes to ensure all TFs aligned
+            start_dt = candidate if start_dt is None else min(start_dt, candidate)
+
+        # Nothing new to fetch
+        if start_dt > end_dt.date():
+            logger.debug(
+                "Dataset %s is already up-to-date through %s", dataset_config.dataset_code, end_dt.date()
+            )
+            return
+
+        start_date = start_dt.strftime("%Y-%m-%d") if isinstance(start_dt, datetime) else start_dt.strftime("%Y-%m-%d")
+        end_date = end_dt.strftime("%Y-%m-%d")
         
         try:
             ingested_count = await self.ingestion_service.ingest_ohlcv_parallel(

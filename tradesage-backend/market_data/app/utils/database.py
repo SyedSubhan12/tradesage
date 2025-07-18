@@ -442,19 +442,54 @@ class OptimizedDatabaseManager:
         stats: Dict[str, Any] = {}
         try:
             if self.read_pool:
-                stats['read_pool'] = {
-                    'size': self.read_pool._maxsize,  # type: ignore[attr-defined]
-                    'used': self.read_pool._size - self.read_pool._queue.qsize(),  # type: ignore[attr-defined]
-                    'idle': self.read_pool._queue.qsize()  # type: ignore[attr-defined]
-                }
+                try:
+                    # Try to get pool stats safely
+                    maxsize = getattr(self.read_pool, '_maxsize', 0)
+                    current_size = getattr(self.read_pool, '_size', 0)
+                    queue_size = getattr(self.read_pool._queue, 'qsize', lambda: 0)()
+                    
+                    stats['read_pool'] = {
+                        'size': maxsize,
+                        'used': max(0, current_size - queue_size),
+                        'idle': queue_size
+                    }
+                except (AttributeError, TypeError) as e:
+                    # Fallback with basic info
+                    stats['read_pool'] = {
+                        'size': 0,
+                        'used': 0,
+                        'idle': 0,
+                        'error': f'Stats unavailable: {str(e)}'
+                    }
+                    
             if self.write_pool:
-                stats['write_pool'] = {
-                    'size': self.write_pool._maxsize,  # type: ignore[attr-defined]
-                    'used': self.write_pool._size - self.write_pool._queue.qsize(),  # type: ignore[attr-defined]
-                    'idle': self.write_pool._queue.qsize()  # type: ignore[attr-defined]
-                }
+                try:
+                    # Try to get pool stats safely
+                    maxsize = getattr(self.write_pool, '_maxsize', 0)
+                    current_size = getattr(self.write_pool, '_size', 0)
+                    queue_size = getattr(self.write_pool._queue, 'qsize', lambda: 0)()
+                    
+                    stats['write_pool'] = {
+                        'size': maxsize,
+                        'used': max(0, current_size - queue_size),
+                        'idle': queue_size
+                    }
+                except (AttributeError, TypeError) as e:
+                    # Fallback with basic info
+                    stats['write_pool'] = {
+                        'size': 0,
+                        'used': 0,
+                        'idle': 0,
+                        'error': f'Stats unavailable: {str(e)}'
+                    }
+                    
         except Exception as exc:
             logger.debug(f"Failed to gather pool stats: {exc}")
+            # Ensure we always return a structure with the expected keys
+            stats = {
+                'read_pool': {'size': 0, 'used': 0, 'idle': 0, 'error': str(exc)},
+                'write_pool': {'size': 0, 'used': 0, 'idle': 0, 'error': str(exc)}
+            }
         return stats
 
     async def close(self):

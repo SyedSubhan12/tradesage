@@ -235,6 +235,7 @@ class ProductionSettings(BaseSettings):
     
     # ==================== Advanced Configuration ====================
     # Feature flags
+    ENABLE_CONTINUOUS_INGESTION: bool = Field(default=True, description="Enable continuous historical/live ingestion orchestrator")
     ENABLE_REAL_TIME_PROCESSING: bool = Field(default=True, description="Enable real-time data processing")
     ENABLE_TRADE_DATA_INGESTION: bool = Field(default=True, description="Enable trade data ingestion")
     ENABLE_NEWS_DATA_INGESTION: bool = Field(default=False, description="Enable news data ingestion")

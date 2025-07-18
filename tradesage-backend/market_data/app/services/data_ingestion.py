@@ -680,6 +680,58 @@ class ProductionDataIngestionService:
                 logger.error(f"Error in ingestion queue processor: {e}")
                 await asyncio.sleep(1)
 
+    # ----------------------- Utility Helpers -----------------------
+
+    async def get_latest_dataset_ohlcv_date(self, dataset: str, timeframe: str) -> Optional[datetime]:
+        """Return the most recent OHLCV bar timestamp already present in the DB.
+
+        This is used by the orchestrator to avoid fetching duplicate data that is
+        already stored. If the table is empty, *None* is returned.
+        """
+        try:
+            async with self.db_manager.get_read_connection() as conn:
+                # Primary query: dataset + timeframe (ohlcv_data has dataset column directly)
+                primary_sql = """
+                    SELECT MAX(timestamp) AS ts 
+                    FROM ohlcv_data 
+                    WHERE dataset = $1 AND timeframe = $2
+                """
+                try:
+                    row = await conn.fetchrow(primary_sql, dataset, timeframe)
+                    if row and row["ts"]:
+                        ts: datetime = row["ts"]
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=timezone.utc)
+                        logger.debug("Latest OHLCV date for %s/%s is %s", dataset, timeframe, ts.date())
+                        return ts
+                    logger.debug("No OHLCV rows found for %s/%s", dataset, timeframe)
+                except Exception as primary_exc:
+                    logger.warning("Primary latest-date query failed: %s", primary_exc)
+                    
+                # Fallback: ignore timeframe (take max across all timeframes for dataset)
+                fallback_sql = """
+                    SELECT MAX(timestamp) AS ts 
+                    FROM ohlcv_data 
+                    WHERE dataset = $1
+                """
+                try:
+                    row = await conn.fetchrow(fallback_sql, dataset)
+                    if row and row["ts"]:
+                        ts: datetime = row["ts"]
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=timezone.utc)
+                        logger.debug("Fallback latest OHLCV date for %s is %s", dataset, ts.date())
+                        return ts
+                except Exception as fb_exc:
+                    logger.warning("Fallback latest-date query failed: %s", fb_exc)
+
+            logger.error("Failed to get latest dataset OHLCV date")
+            return None
+
+        except Exception as exc:
+            logger.error("Failed to get latest dataset OHLCV date: %s", exc)
+            return None
+
     # ----------------------- Monitoring and Stats -----------------------
 
     def get_ingestion_stats(self) -> Dict:

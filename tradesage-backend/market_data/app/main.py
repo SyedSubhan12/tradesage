@@ -367,9 +367,18 @@ class BackgroundTasks:
 
                 # Update DB pool utilisation metric
                 if services.db_manager:
-                    pool_stats = services.db_manager.get_connection_stats()
-                    if 'read_pool' in pool_stats:
-                        DATABASE_CONNECTIONS.set(pool_stats['read_pool']['used'])
+                    try:
+                        pool_stats = services.db_manager.get_connection_stats()
+                        if 'read_pool' in pool_stats and 'used' in pool_stats['read_pool']:
+                            used_connections = pool_stats['read_pool']['used']
+                            if isinstance(used_connections, (int, float)):
+                                DATABASE_CONNECTIONS.set(used_connections)
+                            else:
+                                logger.debug(f"Invalid connection count type: {type(used_connections)}")
+                        else:
+                            logger.debug("Pool stats missing expected keys")
+                    except Exception as pool_exc:
+                        logger.debug(f"Failed to update DB pool metrics: {pool_exc}")
                     
 
                 
