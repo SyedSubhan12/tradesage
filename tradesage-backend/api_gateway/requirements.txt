@@ -2,3 +2,7 @@ fastapi
 uvicorn[standard]
 httpx
 python-multipart
+logging
+starlette
+structlog
+prometheus_client

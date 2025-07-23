@@ -347,9 +347,9 @@ class DatabentoClient:
 
         now_dt = datetime.now(end_dt.tzinfo or timezone.utc)
 
-        # Cap end_dt to yesterday if it is in the future
-        if end_dt >= now_dt:
-            end_dt = now_dt - timedelta(days=1)
+        # Allow same-day data fetching, but cap to current time if in future
+        if end_dt > now_dt:
+            end_dt = now_dt
 
         # Cap to dataset's available end (if known)
         ds_end_dt = self.get_dataset_availability(dataset)

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from .utils.config import get_settings
 from .utils.database import OptimizedDatabaseManager, get_db_manager
 from .routers.v1 import ohlcv, trades, news, websocket_handler as ws_router
+from .api import analytics
 from .schemas.market_data import ErrorResponse
 from .services.redis_optimizer import EnhancedTradingRedisService, get_redis_service
 from .routers.v1.websocket_handler import TradingViewWebSocketManager, get_websocket_manager
@@ -604,6 +605,7 @@ async def websocket_endpoint(websocket: WebSocket):
 app.include_router(ohlcv.router, prefix=settings.API_V1_STR, tags=["OHLCV Data"])
 app.include_router(trades.router, prefix=settings.API_V1_STR, tags=["Trade Data"])
 app.include_router(news.router, prefix=settings.API_V1_STR, tags=["News Data"])
+app.include_router(analytics.router, prefix=settings.API_V1_STR, tags=["Analytics"])
 
 # ----------------------- Continuous Ingestion Control Endpoints -----------------------
 
@@ -782,8 +784,52 @@ async def enhanced_health_check():
         logger.error(f"Health check failed: {e}")
         return JSONResponse(
             status_code=503,
-            content={"status": "unhealthy", "error": str(e)}
+            content={
+                "status": "unhealthy",
+                "error": str(e),
+                "timestamp": time.time()
+            }
         )
+
+@app.get("/debug/database-schema")
+async def debug_database_schema():
+    """Debug endpoint to check database schema and understand latest-date query failures"""
+    try:
+        if not services.ingestion_service:
+            return {"error": "Ingestion service not available"}
+        
+        diagnosis = await services.ingestion_service.diagnose_database_schema()
+        
+        # Also test the latest-date query directly
+        test_results = {}
+        test_datasets = ['XNAS.ITCH', 'XNYS.PILLAR', 'XASE.PILLAR', 'BATS.PITCH']
+        test_timeframes = ['ohlcv-1d', 'ohlcv-1h']
+        
+        for dataset in test_datasets:
+            for timeframe in test_timeframes:
+                try:
+                    latest_date = await services.ingestion_service.get_latest_dataset_ohlcv_date(dataset, timeframe)
+                    test_results[f"{dataset}_{timeframe}"] = {
+                        'success': True,
+                        'latest_date': latest_date.isoformat() if latest_date else None
+                    }
+                except Exception as e:
+                    test_results[f"{dataset}_{timeframe}"] = {
+                        'success': False,
+                        'error': str(e)
+                    }
+        
+        return {
+            'database_diagnosis': diagnosis,
+            'latest_date_tests': test_results,
+            'timestamp': time.time()
+        }
+        
+    except Exception as e:
+        return {
+            'error': f"Database diagnosis failed: {str(e)}",
+            'timestamp': time.time()
+        }
 
 @app.get("/health/ready")
 async def readiness_check():

@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Optional, Tuple, Set, Union
+from typing import List, Dict, Optional, Tuple, Set, Union, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import select, text
 from ..utils.databento_client import DatabentoClient
@@ -697,16 +697,25 @@ class ProductionDataIngestionService:
                     WHERE dataset = $1 AND timeframe = $2
                 """
                 try:
+                    logger.info(f"Executing primary latest-date query for dataset='{dataset}', timeframe='{timeframe}'")
                     row = await conn.fetchrow(primary_sql, dataset, timeframe)
+                    logger.info(f"Primary query result: {row}")
                     if row and row["ts"]:
                         ts: datetime = row["ts"]
                         if ts.tzinfo is None:
                             ts = ts.replace(tzinfo=timezone.utc)
-                        logger.debug("Latest OHLCV date for %s/%s is %s", dataset, timeframe, ts.date())
+                        logger.info("✅ Latest OHLCV date for %s/%s is %s", dataset, timeframe, ts.date())
                         return ts
-                    logger.debug("No OHLCV rows found for %s/%s", dataset, timeframe)
+                    logger.warning("❌ No OHLCV rows found for dataset='%s', timeframe='%s' - query returned: %s", dataset, timeframe, row)
+                    
+                    # Let's also check what datasets and timeframes actually exist
+                    check_sql = "SELECT DISTINCT dataset, timeframe, COUNT(*) FROM ohlcv_data GROUP BY dataset, timeframe ORDER BY dataset, timeframe"
+                    existing_data = await conn.fetch(check_sql)
+                    logger.info(f"Available dataset/timeframe combinations: {[(r['dataset'], r['timeframe'], r['count']) for r in existing_data]}")
+                    
                 except Exception as primary_exc:
-                    logger.warning("Primary latest-date query failed: %s", primary_exc)
+                    logger.warning("Primary latest-date query failed for dataset=%s, timeframe=%s: %s", dataset, timeframe, str(primary_exc))
+                    logger.warning("Primary query SQL was: %s with params: %s, %s", primary_sql, dataset, timeframe)
                     
                 # Fallback: ignore timeframe (take max across all timeframes for dataset)
                 fallback_sql = """
@@ -715,22 +724,76 @@ class ProductionDataIngestionService:
                     WHERE dataset = $1
                 """
                 try:
+                    logger.info(f"Executing fallback latest-date query for dataset='{dataset}'")
                     row = await conn.fetchrow(fallback_sql, dataset)
+                    logger.info(f"Fallback query result: {row}")
                     if row and row["ts"]:
                         ts: datetime = row["ts"]
                         if ts.tzinfo is None:
                             ts = ts.replace(tzinfo=timezone.utc)
-                        logger.debug("Fallback latest OHLCV date for %s is %s", dataset, ts.date())
+                        logger.info("✅ Fallback latest OHLCV date for %s is %s", dataset, ts.date())
                         return ts
-                except Exception as fb_exc:
-                    logger.warning("Fallback latest-date query failed: %s", fb_exc)
+                    logger.warning("❌ No OHLCV rows found for dataset='%s' (fallback) - query returned: %s", dataset, row)
+                except Exception as fallback_exc:
+                    logger.warning("Fallback latest-date query failed for dataset=%s: %s", dataset, fallback_exc)
 
             logger.error("Failed to get latest dataset OHLCV date")
             return None
 
-        except Exception as exc:
-            logger.error("Failed to get latest dataset OHLCV date: %s", exc)
+        except Exception as outer_exc:
+            logger.error("Failed to get latest dataset OHLCV date: %s", outer_exc)
             return None
+    
+    async def diagnose_database_schema(self) -> Dict[str, Any]:
+        """Diagnostic function to check database schema and sample data"""
+        diagnosis = {
+            'table_exists': False,
+            'sample_data': [],
+            'column_info': [],
+            'row_count': 0,
+            'datasets_found': [],
+            'timeframes_found': []
+        }
+        
+        try:
+            async with self.db_manager.get_read_connection() as conn:
+                # Check if table exists
+                table_check = await conn.fetchval(
+                    "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'ohlcv_data')"
+                )
+                diagnosis['table_exists'] = table_check
+                
+                if table_check:
+                    # Get column information
+                    columns = await conn.fetch(
+                        "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'ohlcv_data'"
+                    )
+                    diagnosis['column_info'] = [dict(row) for row in columns]
+                    
+                    # Get row count
+                    count = await conn.fetchval("SELECT COUNT(*) FROM ohlcv_data")
+                    diagnosis['row_count'] = count
+                    
+                    if count > 0:
+                        # Get sample data
+                        sample = await conn.fetch("SELECT * FROM ohlcv_data LIMIT 5")
+                        diagnosis['sample_data'] = [dict(row) for row in sample]
+                        
+                        # Get unique datasets
+                        datasets = await conn.fetch("SELECT DISTINCT dataset FROM ohlcv_data LIMIT 10")
+                        diagnosis['datasets_found'] = [row['dataset'] for row in datasets]
+                        
+                        # Get unique timeframes
+                        timeframes = await conn.fetch("SELECT DISTINCT timeframe FROM ohlcv_data LIMIT 10")
+                        diagnosis['timeframes_found'] = [row['timeframe'] for row in timeframes]
+                        
+                logger.info(f"Database diagnosis: {diagnosis}")
+                return diagnosis
+                
+        except Exception as e:
+            logger.error(f"Database diagnosis failed: {e}")
+            diagnosis['error'] = str(e)
+            return diagnosis
 
     # ----------------------- Monitoring and Stats -----------------------
 

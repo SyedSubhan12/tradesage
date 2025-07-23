@@ -19,6 +19,30 @@ from croniter import croniter
 
 logger = logging.getLogger(__name__)
 
+def is_market_day(date_obj: datetime) -> bool:
+    """Check if a given date is a market trading day (Monday-Friday).
+    
+    Args:
+        date_obj: datetime object to check
+        
+    Returns:
+        bool: True if it's a weekday (market day), False if weekend
+    """
+    return date_obj.weekday() < 5  # Monday=0, Friday=4, Saturday=5, Sunday=6
+
+def get_next_market_day(date_obj: datetime) -> datetime:
+    """Get the next market trading day from the given date.
+    
+    Args:
+        date_obj: Starting date
+        
+    Returns:
+        datetime: Next weekday (market day)
+    """
+    while date_obj.weekday() >= 5:  # Skip weekends
+        date_obj += timedelta(days=1)
+    return date_obj
+
 class IngestionMode(Enum):
     """Ingestion modes for different data retrieval strategies"""
     HISTORICAL_BACKFILL = "historical_backfill"
@@ -168,7 +192,8 @@ class ContinuousDataOrchestrator:
         
         self.state.mode = IngestionMode.HISTORICAL_BACKFILL
         
-        # Get yesterday's date as end point
+        # Get yesterday's date as end point - Databento has 1-day buffer
+        # So we can fetch data up to yesterday (T-1)
         yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
         
         # First, ingest all symbols for all datasets
@@ -182,18 +207,40 @@ class ContinuousDataOrchestrator:
             try:
                 # Determine real start_date: the first *missing* day after the latest bar
                 start_date_cfg = self.dataset_start_dates.get(dataset_code, '2010-01-01')
+                logger.info(f"🔍 Checking database for latest data in {dataset_code}...")
+                
                 # Inspect DB to find latest ingested bar across timeframes
                 latest_dates = []
+                db_query_failed = False
+                
                 for tf in dataset_config.timeframes:
-                    ts = await self.ingestion_service.get_latest_dataset_ohlcv_date(dataset_code, tf)
-                    if ts:
-                        latest_dates.append(ts.date())
+                    logger.info(f"  📊 Querying latest date for {dataset_code}/{tf}...")
+                    try:
+                        ts = await self.ingestion_service.get_latest_dataset_ohlcv_date(dataset_code, tf)
+                        if ts:
+                            latest_dates.append(ts.date())
+                            logger.info(f"  ✅ Found data up to {ts.date()} for {dataset_code}/{tf}")
+                        else:
+                            logger.info(f"  ❌ No data found for {dataset_code}/{tf}")
+                    except Exception as e:
+                        logger.error(f"  💥 Database query failed for {dataset_code}/{tf}: {e}")
+                        db_query_failed = True
+                
                 if latest_dates:
-                    # +1 day after max timestamp present
+                    # +1 day after max timestamp present - use database date, not config date
                     calc_start_dt = max(latest_dates) + timedelta(days=1)
-                    start_date = max(calc_start_dt.strftime('%Y-%m-%d'), start_date_cfg)
+                    start_date = calc_start_dt.strftime('%Y-%m-%d')
+                    logger.info(f"✅ Using database latest date for {dataset_code}: {start_date} (latest data: {max(latest_dates)})")
+                elif db_query_failed:
+                    # Database query failed - be conservative and use a recent date instead of 2018
+                    conservative_start = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+                    start_date = conservative_start
+                    logger.warning(f"⚠️  Database query failed for {dataset_code}, using conservative start date: {start_date} (instead of {start_date_cfg})")
                 else:
+                    # Only use config date when no data exists in database
                     start_date = start_date_cfg
+                    logger.info(f"📅 No existing data for {dataset_code}, using config start date: {start_date}")
+                    
                 # If nothing to backfill, continue
                 if datetime.strptime(start_date, '%Y-%m-%d') > datetime.strptime(yesterday, '%Y-%m-%d'):
                     logger.info(f"{dataset_code} already backfilled up to {yesterday}. Skipping historical phase.")
@@ -217,44 +264,94 @@ class ContinuousDataOrchestrator:
                 current_dt = start_dt
                 total_ingested = 0
                 
-                while current_dt < end_dt and not self.state.should_stop:
-                    chunk_end_dt = min(
-                        current_dt + timedelta(days=dataset_config.backfill_chunk_days),
-                        end_dt
-                    )
-                    
-                    chunk_start = current_dt.strftime('%Y-%m-%d')
-                    chunk_end = chunk_end_dt.strftime('%Y-%m-%d')
-                    
-                    logger.info(f"Processing {dataset_code} chunk: {chunk_start} to {chunk_end}")
-                    
-                    try:
-                        # Process in symbol batches
-                        for i in range(0, len(symbols), dataset_config.max_symbols_per_batch):
-                            symbol_batch = symbols[i:i + dataset_config.max_symbols_per_batch]
-                            
-                            chunk_ingested = await self.ingestion_service.ingest_ohlcv_parallel(
-                                symbols=symbol_batch,
-                                timeframes=dataset_config.timeframes,
-                                start_date=chunk_start,
-                                end_date=chunk_end,
-                                dataset=dataset_config.dataset_code
-                            )
-                            
-                            total_ingested += chunk_ingested
-                            
-                            # Brief pause between batches
-                            await asyncio.sleep(2)
+                while current_dt <= end_dt and not self.state.should_stop:
+                    # For recent data (within 7 days), use day-by-day approach to avoid requesting unavailable dates
+                    days_from_now = (datetime.now().date() - current_dt.date()).days
+                    if days_from_now <= 7:
+                        # Skip weekends (Saturday=5, Sunday=6) when markets are closed
+                        if current_dt.weekday() >= 5:  # Saturday or Sunday
+                            logger.info(f"⏭️ Skipping weekend date: {current_dt.strftime('%Y-%m-%d')} (markets closed)")
+                            current_dt += timedelta(days=1)
+                            continue
                         
-                        # Update progress
-                        progress_pct = ((current_dt - start_dt).days / (end_dt - start_dt).days) * 100
-                        self.progress_tracker[dataset_config.dataset_code]['backfill_progress'] = progress_pct
+                        # Day-by-day approach for recent data
+                        chunk_end_dt = current_dt + timedelta(days=1)
+                        chunk_end_dt = min(chunk_end_dt, end_dt)
                         
-                        logger.info(f"Chunk completed: {chunk_ingested} records. Progress: {progress_pct:.1f}%")
+                        chunk_start = current_dt.strftime('%Y-%m-%d')
+                        chunk_end = chunk_end_dt.strftime('%Y-%m-%d')
                         
-                    except Exception as e:
-                        logger.error(f"Error processing chunk {chunk_start}-{chunk_end} for {dataset_code}: {e}")
-                        # Continue with next chunk instead of failing entire backfill
+                        logger.info(f"Processing {dataset_code} single day: {chunk_start}")
+                        
+                        try:
+                            # Process in symbol batches
+                            chunk_ingested = 0
+                            for i in range(0, len(symbols), dataset_config.max_symbols_per_batch):
+                                symbol_batch = symbols[i:i + dataset_config.max_symbols_per_batch]
+                                
+                                batch_ingested = await self.ingestion_service.ingest_ohlcv_parallel(
+                                    symbols=symbol_batch,
+                                    timeframes=dataset_config.timeframes,
+                                    start_date=chunk_start,
+                                    end_date=chunk_start,  # Same day for start and end
+                                    dataset=dataset_config.dataset_code
+                                )
+                                
+                                chunk_ingested += batch_ingested
+                                total_ingested += batch_ingested
+                                
+                                # Brief pause between batches
+                                await asyncio.sleep(1)
+                            
+                            if chunk_ingested > 0:
+                                logger.info(f"✅ Day completed: {chunk_ingested} records for {chunk_start}")
+                            else:
+                                logger.info(f"📅 No data available for {chunk_start} (expected for recent dates)")
+                            
+                        except Exception as e:
+                            logger.warning(f"⚠️ Failed to fetch data for {chunk_start}: {e}")
+                            # Continue with next day instead of failing entire backfill
+                    else:
+                        # Use chunk approach for older data (more efficient)
+                        chunk_end_dt = min(
+                            current_dt + timedelta(days=dataset_config.backfill_chunk_days),
+                            end_dt
+                        )
+                        
+                        chunk_start = current_dt.strftime('%Y-%m-%d')
+                        chunk_end = chunk_end_dt.strftime('%Y-%m-%d')
+                        
+                        logger.info(f"Processing {dataset_code} chunk: {chunk_start} to {chunk_end}")
+                        
+                        try:
+                            # Process in symbol batches
+                            chunk_ingested = 0
+                            for i in range(0, len(symbols), dataset_config.max_symbols_per_batch):
+                                symbol_batch = symbols[i:i + dataset_config.max_symbols_per_batch]
+                                
+                                batch_ingested = await self.ingestion_service.ingest_ohlcv_parallel(
+                                    symbols=symbol_batch,
+                                    timeframes=dataset_config.timeframes,
+                                    start_date=chunk_start,
+                                    end_date=chunk_end,
+                                    dataset=dataset_config.dataset_code
+                                )
+                                
+                                chunk_ingested += batch_ingested
+                                total_ingested += batch_ingested
+                                
+                                # Brief pause between batches
+                                await asyncio.sleep(2)
+                            
+                            # Update progress
+                            progress_pct = ((current_dt - start_dt).days / (end_dt - start_dt).days) * 100
+                            self.progress_tracker[dataset_config.dataset_code]['backfill_progress'] = progress_pct
+                            
+                            logger.info(f"Chunk completed: {chunk_ingested} records. Progress: {progress_pct:.1f}%")
+                            
+                        except Exception as e:
+                            logger.error(f"Error processing chunk {chunk_start}-{chunk_end} for {dataset_code}: {e}")
+                            # Continue with next chunk instead of failing entire backfill
                     
                     current_dt = chunk_end_dt
                     
